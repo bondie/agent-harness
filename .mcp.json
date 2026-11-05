@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ticket-precedent": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/bondie/ticket-precedent", "tp", "serve"]
+    }
+  }
+}

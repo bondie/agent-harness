@@ -1,0 +1,29 @@
+{
+  "description": "Run the project's tests after the implementer edits a file, and keep subagents from writing to issue trackers.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_tracker_writes.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/run_tests.py\"",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

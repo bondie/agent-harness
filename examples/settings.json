@@ -1,0 +1,6 @@
+{
+  "env": {
+    "HARNESS_TEST_COMMAND": "uv run pytest -x -q",
+    "HARNESS_TEST_TIMEOUT": "300"
+  }
+}

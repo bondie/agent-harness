@@ -1,0 +1,11 @@
+{
+  "name": "bondie",
+  "owner": { "name": "Vladislav Barot" },
+  "plugins": [
+    {
+      "name": "agent-harness",
+      "source": "./",
+      "description": "Analyst, estimator, implementer and reviewer subagents with approval gates; the estimator forecasts hours from similar finished tickets."
+    }
+  ]
+}
