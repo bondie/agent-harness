@@ -1,6 +1,6 @@
 [project]
 name = "agent-harness"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Claude Code agent team for ticket work (analyse, estimate, implement, review) with an estimator that forecasts hours from similar past tickets, backtested against history."
 readme = "README.md"
 license = "MIT"
