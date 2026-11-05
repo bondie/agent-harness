@@ -18,6 +18,12 @@ block the work, show them to the person and stop until they are answered.
 Run the `estimator` subagent with the key and the analysis. Pass the analysis as written;
 never pass the ticket's existing estimate, story points or logged time.
 
+When the project's instructions (CLAUDE.md) name a date since which the team works
+differently, for example implementing with AI agents, tell the estimator the date and ask
+it to call `effort_reference` with `since` set to it. Older tickets then overstate the
+effort: in the backtest, a reference class limited to tickets after such a change cut the
+mean absolute error by almost 30%.
+
 ## 3. Gate: approve the plan
 
 Show the person, briefly: the problem, the acceptance criteria, the proposed approach, the
