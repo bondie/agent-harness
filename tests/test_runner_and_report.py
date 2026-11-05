@@ -156,7 +156,7 @@ def test_cli_builds_llm_variants_for_every_backend(store, tmp_path):
             "--to",
             "2027-01-01",
             "--variants",
-            "llm-keyword,human",
+            "llm-keyword,llm-hybrid-recent,human",
             "--backend",
             "claude:haiku",
             "--backend",
@@ -164,4 +164,10 @@ def test_cli_builds_llm_variants_for_every_backend(store, tmp_path):
         ]
     )
     names = [e.name for e in cli.build_estimators(args, _searcher(store))]
-    assert names == ["llm-keyword@claude-haiku", "llm-keyword@ollama-gemma4:12b", "human"]
+    assert names == [
+        "llm-keyword@claude-haiku",
+        "llm-keyword@ollama-gemma4:12b",
+        "llm-hybrid-recent@claude-haiku",
+        "llm-hybrid-recent@ollama-gemma4:12b",
+        "human",
+    ]

@@ -134,7 +134,8 @@ class LLMEstimator:
     """The estimator agent's prompt with a reference class from `context` retrieval.
 
     `context` is "none" (the ticket alone), "keyword" (BM25 neighbours, like a plain tracker
-    search) or "hybrid" (ticket-precedent's BM25 + embeddings, what the agent uses).
+    search) or "hybrid" (ticket-precedent's BM25 + embeddings, what the agent uses). With
+    `since`, the reference class holds only tickets created after a process change.
     """
 
     backend: Backend
@@ -147,7 +148,8 @@ class LLMEstimator:
 
     @property
     def name(self) -> str:
-        return f"llm-{self.context}@{self.backend.name}"
+        recent = "-recent" if self.since else ""
+        return f"llm-{self.context}{recent}@{self.backend.name}"
 
     def estimate(self, target: Target) -> Estimate | None:
         reference = None

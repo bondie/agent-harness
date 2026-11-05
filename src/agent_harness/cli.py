@@ -16,7 +16,7 @@ from .report import report
 from .runner import load_run, run
 
 BASELINES = ("neighbour-median", "recent-median", "era-scaled-median", "human")
-LLM_CONTEXTS = ("llm-none", "llm-keyword", "llm-hybrid")
+LLM_CONTEXTS = ("llm-none", "llm-keyword", "llm-hybrid", "llm-hybrid-recent")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,8 +89,9 @@ def build_estimators(args: argparse.Namespace, searcher: Searcher) -> list[Estim
                 LLMEstimator(
                     backend(spec),
                     searcher,
-                    context=variant.removeprefix("llm-"),
+                    context=variant.removeprefix("llm-").removesuffix("-recent"),
                     k=args.k,
+                    since=args.change if variant.endswith("-recent") else None,
                     process_note=args.process_note,
                 )
                 for spec in args.backend

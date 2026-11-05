@@ -95,6 +95,18 @@ def test_llm_estimator_sends_the_ticket_and_its_reference_class(store, searcher,
     assert "1.5 h" not in user.split("Reference class")[0]
 
 
+def test_recent_reference_class(store, searcher):
+    backend = Recorder()
+    estimator = LLMEstimator(backend, searcher, since="2026-01-01")
+
+    estimator.estimate(target(store, "SHOP-6"))
+
+    assert estimator.name == "llm-hybrid-recent@fake"
+    user = backend.calls[0][1]
+    assert "SHOP-4" in user
+    assert "SHOP-1 " not in user
+
+
 def test_reference_class_can_be_empty(store, searcher):
     backend = Recorder()
     LLMEstimator(backend, searcher).estimate(target(store, "SHOP-1"))
