@@ -36,7 +36,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "scipy", specifier = ">=1.13" },
-    { name = "ticket-precedent", editable = "../ticket-precedent" },
+    { name = "ticket-precedent", git = "https://github.com/bondie/ticket-precedent?rev=20c14c1e36d916040959442b3a5a6a9b9d81ee73" },
 ]
 
 [package.metadata.requires-dev]
@@ -1778,29 +1778,12 @@ wheels = [
 [[package]]
 name = "ticket-precedent"
 version = "0.1.0"
-source = { editable = "../ticket-precedent" }
+source = { git = "https://github.com/bondie/ticket-precedent?rev=20c14c1e36d916040959442b3a5a6a9b9d81ee73#20c14c1e36d916040959442b3a5a6a9b9d81ee73" }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "pyyaml" },
     { name = "sqlite-vec" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "mcp", specifier = ">=2.3,<3" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "sqlite-vec", specifier = ">=0.1.6" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "ruff", specifier = ">=0.6" },
-    { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

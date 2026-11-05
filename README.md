@@ -134,7 +134,7 @@ model through the same pipeline.
 ## Development
 
 ```bash
-uv sync                      # expects ../ticket-precedent next to this repository
+uv sync                      # installs ticket-precedent from GitHub at a pinned commit
 uv run pytest --cov          # no network, no model, no tracker needed
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 claude plugin validate .

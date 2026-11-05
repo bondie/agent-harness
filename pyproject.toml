@@ -23,7 +23,7 @@ dependencies = [
 harness-eval = "agent_harness.cli:main"
 
 [tool.uv.sources]
-ticket-precedent = { path = "../ticket-precedent", editable = true }
+ticket-precedent = { git = "https://github.com/bondie/ticket-precedent", rev = "20c14c1e36d916040959442b3a5a6a9b9d81ee73" }
 
 [dependency-groups]
 dev = [
