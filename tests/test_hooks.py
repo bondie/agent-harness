@@ -199,3 +199,80 @@ def test_other_agents_and_the_main_session_are_not_limited(agent):
 
 def test_reading_stays_allowed():
     assert memory_guard("Read", "/repo/src/shop.py") is None
+
+
+def transcript(tmp_path: Path) -> Path:
+    def entry(kind: str, stamp: str, **fields: Any) -> str:
+        return json.dumps({"type": kind, "timestamp": stamp, **fields})
+
+    def assistant(stamp: str, request: str, tools: int, output: int) -> str:
+        content = [{"type": "tool_use", "name": "Bash"}] * tools + [{"type": "text", "text": "ok"}]
+        usage = {"input_tokens": 2, "output_tokens": output, "cache_read_input_tokens": 100}
+        message = {"model": "claude-sonnet", "content": content, "usage": usage}
+        return entry("assistant", stamp, requestId=request, message=message)
+
+    path = tmp_path / "subagents" / "agent-a1.jsonl"
+    path.parent.mkdir()
+    lines = [
+        entry("user", "2026-01-01T10:00:00Z", message={"content": "Estimate SHOP-412 please"}),
+        assistant("2026-01-01T10:00:30Z", "r1", tools=2, output=50),
+        assistant("2026-01-01T10:00:31Z", "r1", tools=1, output=50),
+        entry("user", "2026-01-01T10:01:00Z", message={"content": "about OTHER-1"}),
+        assistant("2026-01-01T10:02:00Z", "r2", tools=0, output=20),
+    ]
+    path.write_text("\n".join([*lines, "not json"]) + "\n")
+    meta = {"agentType": "agent-harness:estimator", "description": "Estimate"}
+    path.with_suffix(".meta.json").write_text(json.dumps(meta))
+    return path
+
+
+def log_run(tmp_path: Path, event: dict[str, Any]) -> list[dict[str, Any]]:
+    log = tmp_path / "runs.jsonl"
+    result = hook("log_agent_runs.py", event, HARNESS_RUNS_LOG=str(log))
+    assert result.returncode == 0
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def test_a_finished_subagent_run_is_logged(tmp_path):
+    event = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "s1",
+        "cwd": "/work/shop",
+        "agent_id": "a1",
+        "agent_transcript_path": str(transcript(tmp_path)),
+    }
+
+    [run] = log_run(tmp_path, event)
+
+    assert run["agent_type"] == "agent-harness:estimator"
+    assert run["project"] == "shop"
+    assert run["ticket"] == "SHOP-412"
+    assert run["seconds"] == 120.0
+    assert run["requests"] == 2
+    assert run["tool_uses"] == 3
+    assert run["tokens"]["output_tokens"] == 70
+    assert run["tokens"]["cache_read_input_tokens"] == 200
+    assert run["model"] == "claude-sonnet"
+
+
+def test_runs_are_appended(tmp_path):
+    event = {"agent_id": "a1", "agent_transcript_path": str(transcript(tmp_path))}
+    log_run(tmp_path, event)
+    assert len(log_run(tmp_path, event)) == 2
+
+
+@pytest.mark.parametrize("event", [{}, {"agent_transcript_path": "/nowhere/agent.jsonl"}])
+def test_a_missing_transcript_logs_nothing(tmp_path, event):
+    assert log_run(tmp_path, event) == []
+
+
+def test_bad_input_never_blocks_the_session(tmp_path):
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(HOOKS / "log_agent_runs.py")],
+        input="not json",
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HARNESS_RUNS_LOG": str(tmp_path / "runs.jsonl")},
+        check=False,
+    )
+    assert result.returncode == 0
