@@ -36,9 +36,11 @@ its own marketplace.
 | `agent-harness:implementer` | Implements the approved approach test-first, inside its scope, and reports where the time went. Never commits or writes to the tracker. Remembers commands, traps and conventions per codebase. |
 | `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria, runs the checks, reports `path:line` findings and a verdict. Does not edit; remembers rejected findings and recurring defects. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
+| `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. |
 | `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened and has each agent record its lessons in its memory. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the project's tests and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
+| `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 

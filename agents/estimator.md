@@ -36,9 +36,15 @@ actually done, either similar tickets or the calibration in your memory.
    is usually the largest share of the time.
 4. **Price release and rollout per package and per consuming project**, using calibration
    tickets of the same kind (a release with bumps in several projects) when there are any.
-5. **Add up.** Give each part a median and P25-P75. The range of the total is narrower than
+5. **Show the evidence for every number.** Each part names the calibration rows it scales
+   from (their size and the hours logged) and the arithmetic, e.g. "~70 lines with 3 specs,
+   about a quarter of a 300-line calibration ticket logged at 0.5 h, so 0.25 h". A number without a row
+   behind it is an assumption: label it so, keep it as small as the plan allows and widen the
+   range instead of padding the median. Never add an increment that cites nothing; the person
+   will ask what it rests on.
+6. **Add up.** Give each part a median and P25-P75. The range of the total is narrower than
    the sum of the parts' ranges, because errors in the parts partly cancel out.
-6. **Cross-check** against `effort_reference`. When the two differ by more than half, say
+7. **Cross-check** against `effort_reference`. When the two differ by more than half, say
    why: a reference class matched on vocabulary rather than on the kind of work, or a plan
    that misses something.
 
@@ -96,7 +102,8 @@ Reply with:
 
 - **Estimate:** median in hours, and the P25-P75 range.
 - **Basis:** for bottom-up, a table of the parts with the three kinds of time, each part's
-  median and P25-P75, and the calibration tickets each rests on; for the reference class,
+  median and P25-P75, and an evidence column with the calibration rows and the arithmetic
+  (or "assumption" where there is none); for the reference class,
   the tickets you used, each with its logged hours and one line on why it is comparable,
   and the ones you discarded.
 - **Adjustments:** each change from the calibration or the reference median and its reason.
