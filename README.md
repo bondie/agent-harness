@@ -9,12 +9,15 @@ tracker ticket from analysis to a reviewed change: an analyst, an estimator, an 
 and a reviewer. A person approves the plan and the estimate before any code is written, and
 nothing is written to the tracker without their confirmation.
 
-The estimator does not guess. It looks up how long similar finished tickets actually took
-([reference class forecasting](https://en.wikipedia.org/wiki/Reference_class_forecasting))
-through [ticket-precedent](https://github.com/bondie/ticket-precedent), and answers with a
-median, a P25–P75 range and the tickets it relied on. The repository also contains the
-backtest that measures it against simpler baselines, a local model and human estimates on
-real, private ticket history; only aggregate numbers are published.
+The estimator does not guess. With the analyst's file-by-file plan it prices each part from
+a calibration: the implementer's own recent tickets, with the size of their diffs and the
+hours logged on them. Without a plan it looks up how long similar finished tickets actually
+took ([reference class forecasting](https://en.wikipedia.org/wiki/Reference_class_forecasting))
+through [ticket-precedent](https://github.com/bondie/ticket-precedent). Either way it answers
+with one number rounded to half an hour and the evidence behind each part; the P25–P75 range
+comes on request. The repository also contains the backtest that measures the reference class
+mode against simpler baselines, a local model and human estimates on real, private ticket
+history; only aggregate numbers are published.
 
 **Backtest on 1,212 finished tickets from 2026** (private history, logged hours as ground
 truth, no future data in reach): the estimator with a recent reference class is as accurate
@@ -32,7 +35,7 @@ its own marketplace.
 | Component | Role |
 |---|---|
 | `agent-harness:jira-analyst` | Reads the ticket, comments, links and precedents, finds the code; returns problem, acceptance criteria, approach, a file-by-file implementation plan, open questions. Read-only apart from its memory of each codebase. |
-| `agent-harness:estimator` | Hours as median and P25–P75: bottom-up from the implementation plan, calibrated on the implementer's own logged time, or a reference class forecast when there is no plan. Read-only apart from its memory of calibration and corrections. |
+| `agent-harness:estimator` | Hours as one number rounded to half an hour, with evidence for each part (P25–P75 on request): bottom-up from the implementation plan, calibrated on the implementer's own logged time, or a reference class forecast when there is no plan. Read-only apart from its memory of calibration and corrections. |
 | `agent-harness:implementer` | Implements the approved approach test-first, inside its scope, and reports where the time went. Never commits or writes to the tracker. Remembers commands, traps and conventions per codebase. |
 | `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria, runs the checks, reports `path:line` findings and a verdict. Does not edit; remembers rejected findings and recurring defects. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
@@ -101,6 +104,10 @@ a real precedent it overstated the effort about three times in practice.
 3. Anchor on the median, then adjust only for differences it can name.
 4. Keep the P25–P75 range honest: it should contain the actual time half of the time.
 5. Prefer neighbours from after a process change (or scale older ones down).
+
+The answer is one number rounded to half an hour, with the evidence for each part: the
+calibration rows and the arithmetic, or the tickets it used. The estimator still works out a
+P25–P75 range and shows it when asked; the backtest asks for it to measure its coverage.
 
 The calibration and the corrections a person made to past estimates live in the estimator's
 [memory](https://code.claude.com/docs/en/sub-agents) (`memory: user`, so
@@ -191,6 +198,10 @@ be told.
 - **Agents learn from facts, in a retro.** A memory that only the agent itself fills learns
   from what it noticed. The `retro` skill feeds each agent what actually happened: the logged
   hours against the estimate, the files the plan missed, the findings the person rejected.
+- **One number by default, the range on request.** The person at the gate approves or
+  changes one number and later compares it with the logged time, so that is what the
+  estimator leads with. Every part must cite its evidence; an increment that cites nothing
+  is not allowed.
 - **Two human gates.** Between estimate and implementation (the expensive mistake is
   building the wrong thing) and before anything leaves the machine (commit, comment).
 - **The eval runs the shipped prompt.** The LLM variants use the body of

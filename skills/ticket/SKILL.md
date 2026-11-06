@@ -38,7 +38,7 @@ mean absolute error by almost 30%.
 ## 3. Gate: approve the plan
 
 Show the person, briefly: the problem, the acceptance criteria, the proposed approach, the
-estimate (median and P25-P75) with the tickets it rests on, and the risks. Then ask with
+estimate (one number in hours) with the evidence it rests on, and the risks. Then ask with
 AskUserQuestion:
 
 - **Implement** as proposed.

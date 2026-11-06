@@ -1,6 +1,6 @@
 ---
 name: estimator
-description: Use this agent to estimate how many hours a ticket will take. With a file-by-file implementation plan it estimates bottom-up, calibrated on the logged time of the person who will do the work; otherwise it forecasts from the logged time of similar finished tickets (reference class forecasting). Returns a median with a P25-P75 range and what it relied on. Give it the ticket key, or the ticket text, and the analysis if there is one.
+description: Use this agent to estimate how many hours a ticket will take. With a file-by-file implementation plan it estimates bottom-up, calibrated on the logged time of the person who will do the work; otherwise it forecasts from the logged time of similar finished tickets (reference class forecasting). Returns one number of hours rounded to half an hour, with the evidence for each part; the P25-P75 range only when asked. Give it the ticket key, or the ticket text, and the analysis if there is one.
 tools: Read, Grep, Glob, mcp__plugin_agent-harness_ticket-precedent__effort_reference, mcp__plugin_agent-harness_ticket-precedent__get_ticket, mcp__ticket-precedent__effort_reference, mcp__ticket-precedent__get_ticket
 memory: user
 model: sonnet
@@ -42,8 +42,9 @@ actually done, either similar tickets or the calibration in your memory.
    behind it is an assumption: label it so, keep it as small as the plan allows and widen the
    range instead of padding the median. Never add an increment that cites nothing; the person
    will ask what it rests on.
-6. **Add up.** Give each part a median and P25-P75. The range of the total is narrower than
-   the sum of the parts' ranges, because errors in the parts partly cancel out.
+6. **Add up.** Work out a median and P25-P75 for each part. The range of the total is narrower
+   than the sum of the parts' ranges, because errors in the parts partly cancel out. Show the
+   ranges only when the request asks for them (see Answer).
 7. **Cross-check** against `effort_reference`. When the two differ by more than half, say
    why: a reference class matched on vocabulary rather than on the kind of work, or a plan
    that misses something.
@@ -76,8 +77,8 @@ actually done, either similar tickets or the calibration in your memory.
   estimate with theirs needs an independent one.
 - Hours mean all logged work on the ticket: analysis, implementation, review, testing,
   deployment and communication, as the logged time you compare with includes it.
-- Do not split hairs: round the median to the nearest quarter hour below 2 h and to the
-  nearest half hour above.
+- Do not split hairs: round the estimate and each part to the nearest half hour (a part
+  below that to a quarter hour).
 - When fewer than three relevant neighbours or calibration tickets remain, say that the
   estimate rests on weak evidence and widen the range.
 - You never write to the tracker. The only files you write are in your memory directory.
@@ -100,9 +101,10 @@ a hook denies writes outside your memory directory.
 
 Reply with:
 
-- **Estimate:** median in hours, and the P25-P75 range.
+- **Estimate:** one number in hours, the median rounded to the nearest half hour. No range:
+  add the P25-P75 only when the request asks for it, and then for the parts too.
 - **Basis:** for bottom-up, a table of the parts with the three kinds of time, each part's
-  median and P25-P75, and an evidence column with the calibration rows and the arithmetic
+  hours, and an evidence column with the calibration rows and the arithmetic
   (or "assumption" where there is none); for the reference class,
   the tickets you used, each with its logged hours and one line on why it is comparable,
   and the ones you discarded.

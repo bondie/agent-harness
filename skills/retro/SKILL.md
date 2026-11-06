@@ -12,7 +12,7 @@ its time is logged; a retro on half-logged time teaches the estimator the wrong 
 
 ## 1. Collect the facts
 
-- **Estimate:** what the estimator said (median and P25–P75, per part when it estimated
+- **Estimate:** what the estimator said (the hours, per part when it estimated
   bottom-up), from this conversation or from the comment where it was posted.
 - **Actual time:** the person's own logged hours on the ticket from the tracker's worklogs,
   and the total if others logged too. Ask the person when the worklogs are not readable.
