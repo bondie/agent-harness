@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: the analyst and the estimator write only to their own memory.
+"""PreToolUse hook: the analyst, the estimator and the reviewer write only to their own memory.
 
 Their `memory` front matter gives them Write and Edit so that they can keep notes between runs
 in `agent-memory/<agent>/`. Every other file stays read-only for them. Standard library only.
@@ -14,7 +14,7 @@ import sys
 from pathlib import PurePath
 from typing import Any, TextIO
 
-READ_ONLY_AGENTS = {"jira-analyst", "estimator"}
+READ_ONLY_AGENTS = {"jira-analyst", "estimator", "reviewer-qa"}
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 MEMORY_DIRS = {"agent-memory", "agent-memory-local"}
 

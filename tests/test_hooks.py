@@ -163,9 +163,13 @@ def memory_guard(
             "/repo/.claude/agent-memory/agent-harness-jira-analyst/a.md",
         ),
         ("estimator", "/repo/.claude/agent-memory-local/estimator/MEMORY.md"),
+        (
+            "agent-harness:reviewer-qa",
+            "/home/u/.claude/agent-memory/agent-harness-reviewer-qa/m.md",
+        ),
     ],
 )
-def test_analyst_and_estimator_write_to_their_own_memory(agent, path):
+def test_read_only_agents_write_to_their_own_memory(agent, path):
     assert memory_guard("Write", path, agent) is None
 
 
@@ -181,8 +185,9 @@ def test_analyst_and_estimator_write_to_their_own_memory(agent, path):
     ],
 )
 @pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
-def test_analyst_and_estimator_cannot_write_elsewhere(tool, path):
-    verdict = memory_guard(tool, path)
+@pytest.mark.parametrize("agent", ["agent-harness:estimator", "agent-harness:reviewer-qa"])
+def test_read_only_agents_cannot_write_elsewhere(tool, path, agent):
+    verdict = memory_guard(tool, path, agent)
     assert verdict is not None
     assert verdict["hookSpecificOutput"]["permissionDecision"] == "deny"
 
