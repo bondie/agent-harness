@@ -1,5 +1,5 @@
 {
-  "description": "Run the project's tests after the implementer edits a file, and keep subagents from writing to issue trackers.",
+  "description": "Run the project's tests after the implementer edits a file, keep subagents from writing to issue trackers, and let the analyst and the estimator write only to their memory.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,16 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_tracker_writes.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_memory_writes.py\"",
             "timeout": 10
           }
         ]

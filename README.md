@@ -31,13 +31,14 @@ its own marketplace.
 
 | Component | Role |
 |---|---|
-| `agent-harness:jira-analyst` | Reads the ticket, comments, links and precedents, finds the code; returns problem, acceptance criteria, approach, open questions. Read-only. |
-| `agent-harness:estimator` | Reference class forecast in hours: median, P25–P75, cited tickets, named adjustments. Read-only. |
+| `agent-harness:jira-analyst` | Reads the ticket, comments, links and precedents, finds the code; returns problem, acceptance criteria, approach, a file-by-file implementation plan, open questions. Read-only apart from its memory of each codebase. |
+| `agent-harness:estimator` | Hours as median and P25–P75: bottom-up from the implementation plan, calibrated on the implementer's own logged time, or a reference class forecast when there is no plan. Read-only apart from its memory of calibration and corrections. |
 | `agent-harness:implementer` | Implements the approved approach test-first, inside its scope. Never commits or writes to the tracker. |
 | `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria, runs the checks, reports `path:line` findings and a verdict. Does not edit. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the project's tests and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
+| `hooks/guard_memory_writes.py` | Lets the analyst and the estimator write only to their own memory directory. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
 ```mermaid
@@ -78,7 +79,18 @@ Then, per project:
 
 ## The estimator
 
-The method is in [`agents/estimator.md`](agents/estimator.md):
+The method is in [`agents/estimator.md`](agents/estimator.md). It has two modes.
+
+**Bottom-up, when the analysis has a file-by-file implementation plan.** Each part of the
+plan is split into implementation with an AI coding agent (including review), manual
+verification and debugging, and release and rollout. Implementation is priced from a
+calibration: the implementer's own recent tickets, each with the size of its diff and the
+hours they logged. Verification is priced by the scenarios that have to be checked, not by
+lines. The reference class serves as a cross-check. This mode exists because a reference
+class matches tickets on vocabulary, not on the kind of work: for cross-cutting work without
+a real precedent it overstated the effort about three times in practice.
+
+**Reference class, otherwise:**
 
 1. Get the reference class: `effort_reference` returns the most similar tickets **whose time
    was all logged before the ticket was created**, with their hours, median and P25–P75.
@@ -86,6 +98,12 @@ The method is in [`agents/estimator.md`](agents/estimator.md):
 3. Anchor on the median, then adjust only for differences it can name.
 4. Keep the P25–P75 range honest: it should contain the actual time half of the time.
 5. Prefer neighbours from after a process change (or scale older ones down).
+
+The calibration and the corrections a person made to past estimates live in the estimator's
+[memory](https://code.claude.com/docs/en/sub-agents) (`memory: user`, so
+`~/.claude/agent-memory/agent-harness-estimator/`), outside the repository. The playbook
+collects the calibration from the tracker's worklogs and `git log --numstat` when it is
+missing. The backtest measures only the reference class mode: its tickets have no plans.
 
 It never reads the ticket's existing estimate or logged time: a model shown a number anchors
 on it ([Çalikli & Alhamed, FSE 2025](https://doi.org/10.1145/3715771)), and the person
@@ -161,6 +179,10 @@ be told.
 - **Tracker writes are blocked, not just discouraged.** The prompts say subagents only read;
   a `PreToolUse` hook enforces it for any MCP tool that looks like a tracker write. The main
   session keeps its normal permission prompt, and the playbook asks before every write.
+- **The analyst and the estimator remember, and nothing else.** Both have `memory: user`:
+  the analyst keeps where things live in each codebase, the estimator keeps calibration and
+  corrections. Memory gives an agent Write and Edit, so a `PreToolUse` hook denies them
+  every path outside the agent's own `agent-memory/<agent>/` directory.
 - **Two human gates.** Between estimate and implementation (the expensive mistake is
   building the wrong thing) and before anything leaves the machine (commit, comment).
 - **The eval runs the shipped prompt.** The LLM variants use the body of
