@@ -5,7 +5,7 @@
     {
       "name": "agent-harness",
       "source": "./",
-      "description": "Analyst, estimator, implementer and reviewer subagents with approval gates; the estimator forecasts hours from similar finished tickets."
+      "description": "Analyst, estimator, implementer and reviewer subagents with approval gates; the estimator prices the plan from the implementer's logged time or from similar finished tickets, with evidence for every number."
     }
   ]
 }
