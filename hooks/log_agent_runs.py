@@ -92,6 +92,16 @@ def summarise(transcript: Path) -> dict[str, Any]:
     }
 
 
+def project_name(cwd: str) -> str | None:
+    if not cwd:
+        return None
+    path = Path(cwd)
+    for folder in (path, *path.parents):
+        if (folder / ".git").exists():
+            return folder.name or None
+    return path.name or None
+
+
 def record(event: dict[str, Any]) -> dict[str, Any] | None:
     transcript = event.get("agent_transcript_path")
     if not transcript or not Path(transcript).is_file():
@@ -100,7 +110,7 @@ def record(event: dict[str, Any]) -> dict[str, Any] | None:
     meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
     return {
         "session": event.get("session_id"),
-        "project": Path(str(event.get("cwd") or "")).name or None,
+        "project": project_name(str(event.get("cwd") or "")),
         "agent_id": event.get("agent_id"),
         "agent_type": event.get("agent_type") or meta.get("agentType"),
         "description": meta.get("description"),

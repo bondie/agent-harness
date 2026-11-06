@@ -255,6 +255,25 @@ def test_a_finished_subagent_run_is_logged(tmp_path):
     assert run["model"] == "claude-sonnet"
 
 
+@pytest.mark.parametrize("git", ["dir", "file"])
+def test_the_project_is_the_repository_not_the_subdirectory(tmp_path, git):
+    repo = tmp_path / "shop"
+    (repo / "src" / "server").mkdir(parents=True)
+    if git == "dir":
+        (repo / ".git").mkdir()
+    else:
+        (repo / ".git").write_text("gitdir: /elsewhere\n")
+    event = {
+        "cwd": str(repo / "src" / "server"),
+        "agent_id": "a1",
+        "agent_transcript_path": str(transcript(tmp_path)),
+    }
+
+    [run] = log_run(tmp_path, event)
+
+    assert run["project"] == "shop"
+
+
 def test_runs_are_appended(tmp_path):
     event = {"agent_id": "a1", "agent_transcript_path": str(transcript(tmp_path))}
     log_run(tmp_path, event)
