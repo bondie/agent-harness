@@ -133,3 +133,64 @@ def test_reads_and_other_tools_pass(tool):
 
 def test_the_main_session_keeps_its_normal_permission_prompt():
     assert guard("mcp__plugin_jira-mcp_jira__add_comment", agent=None) is None
+
+
+def memory_guard(
+    tool: str, path: str, agent: str | None = "agent-harness:estimator", cwd: str = "/repo"
+) -> dict[str, Any] | None:
+    event: dict[str, Any] = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": {"file_path": path},
+        "cwd": cwd,
+    }
+    if agent:
+        event["agent_type"] = agent
+    result = hook("guard_memory_writes.py", event)
+    assert result.returncode == 0
+    return json.loads(result.stdout) if result.stdout else None
+
+
+@pytest.mark.parametrize(
+    ("agent", "path"),
+    [
+        (
+            "agent-harness:estimator",
+            "/home/u/.claude/agent-memory/agent-harness-estimator/MEMORY.md",
+        ),
+        (
+            "agent-harness:jira-analyst",
+            "/repo/.claude/agent-memory/agent-harness-jira-analyst/a.md",
+        ),
+        ("estimator", "/repo/.claude/agent-memory-local/estimator/MEMORY.md"),
+    ],
+)
+def test_analyst_and_estimator_write_to_their_own_memory(agent, path):
+    assert memory_guard("Write", path, agent) is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/repo/src/shop.py",
+        "src/shop.py",
+        "/home/u/.claude/agent-memory/agent-harness-jira-analyst/MEMORY.md",
+        "/home/u/.claude/agent-memory/agent-harness-estimator",
+        "/home/u/.claude/agent-memory/agent-harness-estimator/../../../CLAUDE.md",
+        "",
+    ],
+)
+@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+def test_analyst_and_estimator_cannot_write_elsewhere(tool, path):
+    verdict = memory_guard(tool, path)
+    assert verdict is not None
+    assert verdict["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("agent", [None, "agent-harness:implementer", "general-purpose"])
+def test_other_agents_and_the_main_session_are_not_limited(agent):
+    assert memory_guard("Write", "/repo/src/shop.py", agent) is None
+
+
+def test_reading_stays_allowed():
+    assert memory_guard("Read", "/repo/src/shop.py") is None

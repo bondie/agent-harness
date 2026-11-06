@@ -15,8 +15,19 @@ block the work, show them to the person and stop until they are answered.
 
 ## 2. Estimate
 
-Run the `estimator` subagent with the key and the analysis. Pass the analysis as written;
-never pass the ticket's existing estimate, story points or logged time.
+Run the `estimator` subagent with the key and the analysis. Pass the analysis as written,
+including its implementation plan; never pass the ticket's existing estimate, story points
+or logged time.
+
+Tell the estimator who will do the work. With an implementation plan it estimates bottom-up
+from that person's calibration, kept in its memory. When it reports that the calibration is
+missing or out of date, collect it and run it again: the person's own logged time on their
+recent finished tickets (the tracker's worklogs) next to the size of their commits for each
+ticket (`git log --author=<person> --numstat`, grouped by the ticket key in the message).
+Ten to twenty tickets of different sizes are enough.
+
+When the person rejects an estimate, tell the estimator what they said, so that it records
+the correction in its memory.
 
 When the project's instructions (CLAUDE.md) name a date since which the team works
 differently, for example implementing with AI agents, tell the estimator the date and ask
