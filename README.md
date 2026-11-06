@@ -33,12 +33,13 @@ its own marketplace.
 |---|---|
 | `agent-harness:jira-analyst` | Reads the ticket, comments, links and precedents, finds the code; returns problem, acceptance criteria, approach, a file-by-file implementation plan, open questions. Read-only apart from its memory of each codebase. |
 | `agent-harness:estimator` | Hours as median and P25–P75: bottom-up from the implementation plan, calibrated on the implementer's own logged time, or a reference class forecast when there is no plan. Read-only apart from its memory of calibration and corrections. |
-| `agent-harness:implementer` | Implements the approved approach test-first, inside its scope. Never commits or writes to the tracker. |
-| `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria, runs the checks, reports `path:line` findings and a verdict. Does not edit. |
+| `agent-harness:implementer` | Implements the approved approach test-first, inside its scope, and reports where the time went. Never commits or writes to the tracker. Remembers commands, traps and conventions per codebase. |
+| `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria, runs the checks, reports `path:line` findings and a verdict. Does not edit; remembers rejected findings and recurring defects. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
+| `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened and has each agent record its lessons in its memory. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the project's tests and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
-| `hooks/guard_memory_writes.py` | Lets the analyst and the estimator write only to their own memory directory. |
+| `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
 ```mermaid
@@ -179,10 +180,15 @@ be told.
 - **Tracker writes are blocked, not just discouraged.** The prompts say subagents only read;
   a `PreToolUse` hook enforces it for any MCP tool that looks like a tracker write. The main
   session keeps its normal permission prompt, and the playbook asks before every write.
-- **The analyst and the estimator remember, and nothing else.** Both have `memory: user`:
-  the analyst keeps where things live in each codebase, the estimator keeps calibration and
-  corrections. Memory gives an agent Write and Edit, so a `PreToolUse` hook denies them
-  every path outside the agent's own `agent-memory/<agent>/` directory.
+- **Every agent remembers, and the read-only ones remember nothing else.** All four have
+  `memory: user`: the analyst keeps where things live in each codebase, the estimator keeps
+  calibration and corrections, the implementer keeps commands and traps, the reviewer keeps
+  rejected findings and recurring defects. Memory gives an agent Write and Edit, so a
+  `PreToolUse` hook denies the analyst, the estimator and the reviewer every path outside
+  their own `agent-memory/<agent>/` directory.
+- **Agents learn from facts, in a retro.** A memory that only the agent itself fills learns
+  from what it noticed. The `retro` skill feeds each agent what actually happened: the logged
+  hours against the estimate, the files the plan missed, the findings the person rejected.
 - **Two human gates.** Between estimate and implementation (the expensive mistake is
   building the wrong thing) and before anything leaves the machine (commit, comment).
 - **The eval runs the shipped prompt.** The LLM variants use the body of

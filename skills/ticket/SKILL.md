@@ -65,6 +65,16 @@ work took compared with the estimate. Ask what to do next: commit (following the
 commit conventions), post a summary comment to the ticket, or leave the changes uncommitted.
 Do each only after the person confirms it.
 
+When the project has its own skills for releasing and deploying, offer them here; they run only
+with the person's explicit go-ahead for that release or deploy.
+
+## 7. Retro
+
+When the work is done and its time is logged, run the `retro` skill with the key, now or in
+a later session. It compares the estimate and the plan with what happened and has each agent
+record its lessons in its memory. Offer it at the hand-over; a team that never runs it does
+not get better.
+
 ## Rules
 
 - Subagents never write to the tracker; the plugin blocks it. You write only after explicit
