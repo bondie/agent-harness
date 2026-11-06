@@ -1,6 +1,6 @@
 {
   "name": "agent-harness",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A ticket team for Claude Code: analyst, estimator, implementer and reviewer, with a person approving the estimate before any code is written. The estimator forecasts hours from similar finished tickets.",
   "author": { "name": "Vladislav Barot" },
   "homepage": "https://github.com/bondie/agent-harness",
