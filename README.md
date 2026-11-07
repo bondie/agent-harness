@@ -41,6 +41,7 @@ its own marketplace.
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
 | `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. |
 | `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened and has each agent record its lessons in its memory. |
+| `/agent-harness:upgrade-impact` | A [dynamic workflow](https://code.claude.com/docs/en/workflows): before a dependency upgrade, one agent per component group reads the changelog in the version range and finds the changes your code uses; skeptics try to refute each risk. Returns the risks that survive, with `repo:path:line` and a test for each. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
 | `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
@@ -128,6 +129,52 @@ missing. The backtest measures only the reference class mode: its tickets have n
 It never reads the ticket's existing estimate or logged time: a model shown a number anchors
 on it ([Çalikli & Alhamed, FSE 2025](https://doi.org/10.1145/3715771)), and the person
 comparing estimates needs an independent one.
+
+## Workflows
+
+[Dynamic workflows](https://code.claude.com/docs/en/workflows) run a script that starts many
+subagents at once. They fit work that splits into independent pieces, each of which can be
+checked, and they cannot stop for a person's approval in the middle. So the ticket playbook
+stays a conversation with its two gates, and the plugin ships a workflow only where fanning
+out pays.
+
+**`/agent-harness:upgrade-impact`** answers "what in this upgrade hits our code?" before a
+patch or minor upgrade of a framework, across one or more repositories. It only reads.
+
+1. **Find:** one agent per group of components takes the changelog entries in the version
+   range, keeps those that can change behaviour, searches the repositories (`git grep` on a
+   ref, nothing is checked out) and returns findings with `repo:path:line`, a risk and a test.
+   A medium or high risk has to name the old and the new behaviour and the code that sees it.
+2. **Verify:** skeptics try to refute each risk, one lens each: is the change real and in
+   range, and does our code exercise it. A high risk gets both, a medium one the usage lens.
+   A risk survives unless every skeptic refutes it; one refutation marks it disputed.
+
+```text
+/agent-harness:upgrade-impact
+args: { dependency, from, to, changelog: <path>, repos: [{ name, path, ref, paths }],
+        groups: [{ name, components }], versions?: { <component>: <installed version> } }
+```
+
+**Pilot:** a Symfony patch upgrade (6.4.8 -> 6.4.50, 58 components in 6 groups)
+across 8 repositories of one e-commerce platform, with the first version of the script (two
+skeptics for every medium or high risk).
+
+| | |
+|---|---:|
+| Changelog entries reviewed | 1,433 |
+| Risks the finders rated medium or high | 42 |
+| Refuted by both skeptics | 36 |
+| Kept, with a concrete test | 4 (3 of them disputed) |
+| Rated low (API used, change benign) | 58 |
+| Agents / wall-clock / subagent tokens | 86 / 9 min / 4.7 M |
+
+What it taught: the finders rated a risk medium whenever our code used the changed API, and
+the skeptics refuted most of those with a specific reason (the fix only applies to a case our
+code does not have). The skeptics paid for themselves: four tests to run instead of
+forty-two. They also cost most of the agents, so the current script asks finders to name the
+behaviour difference before rating a risk medium, verifies a medium risk once, and accepts the
+installed version per component (the pilot assumed one version for all, and a skeptic
+noticed that one package was already newer).
 
 ## Does it work?
 
@@ -254,7 +301,7 @@ model through the same pipeline.
 
 ```bash
 uv sync                      # installs ticket-precedent from GitHub at a pinned commit
-uv run pytest --cov          # no network, no model, no tracker needed
+uv run pytest --cov          # no network, no model, no tracker needed (workflow tests need node)
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 claude plugin validate .
 ```
