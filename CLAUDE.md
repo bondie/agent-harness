@@ -8,6 +8,8 @@ Python package that backtests its estimator.
 - `agents/*.md`: the subagents. `agents/estimator.md` is also the system prompt of the LLM
   variants in the evaluation, so a change to it changes the measured results: rerun the eval.
 - `skills/ticket/SKILL.md`: the team-lead flow with the two approval gates.
+- `workflows/*.js`: dynamic workflows shipped with the plugin (`/agent-harness:<name>`). Plain
+  JavaScript, `meta` a pure literal, no clock or randomness; `tests/test_workflows.py` checks it.
 - `hooks/`: standard-library Python scripts called by `hooks/hooks.json`. Keep them free of
   third-party imports, they run with the user's `python3`.
 - `src/agent_harness/`: the backtest (`harness-eval`). Reads a ticket-precedent index.
