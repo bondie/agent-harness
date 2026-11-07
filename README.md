@@ -41,7 +41,7 @@ its own marketplace.
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
 | `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. |
 | `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened and has each agent record its lessons in its memory. |
-| `hooks/run_tests.py` | After each edit **by the implementer**, runs the project's tests and hands failures back to it. |
+| `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
 | `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory. |
@@ -81,7 +81,17 @@ Then, per project:
    ```
 
    `{file}` in the command becomes the edited file, e.g. `phpunit --filter … {file}`. Without
-   the variable the hook does nothing.
+   the variable, edits in the project run no tests.
+
+   An edit in another git repository, such as a platform checked out next to the project,
+   runs that repository's own command and timeout from the `env` of its
+   `.claude/settings.local.json` or `.claude/settings.json` (local wins), in its root and with
+   `{file}` relative to it. A repository nested in the project, such as a submodule, counts
+   as the project. When the other repository sets no command, the hook runs no tests there;
+   if the project sets one, it tells the implementer, who then names in its report the tests
+   that cover the change and their command, and the team lead decides whether to run them.
+   The hook runs that repository's command through the shell although Claude Code itself does
+   not load that repository's settings, so edit only repositories whose settings you trust.
 
 ## The estimator
 
