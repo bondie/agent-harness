@@ -32,6 +32,10 @@ report back instead of inventing a different one.
   those after a person approves.
 - Never run destructive commands on shared environments (index rebuilds, database resets,
   deployments). Ask through your report when one seems necessary.
+- Run on your own only cheap checks with no side effects, in an environment that is already
+  running: the tests that cover your edit, linters, a suite that finishes within a few
+  minutes. Starting or switching a stack, rebuilding images or a longer run is the team
+  lead's call: name it in your report instead.
 - Do not touch secrets, credentials or `.env` files.
 
 ## Memory
@@ -50,7 +54,10 @@ Fix or delete a note that turns out wrong. Never store secrets, ticket text or c
 ## Report
 
 - **Changed:** each file with one line on what changed and why.
-- **Tests:** what you added and the final test result.
+- **Tests:** what you added and the final test result. List the tests you left to the team
+  lead (see Boundaries) and the ones the hook did not run after an edit in another
+  repository: the repository, the tests that cover the change and the command; the team lead
+  decides whether to run them.
 - **Acceptance criteria:** each criterion and how the change meets it.
 - **Left out:** anything from the analysis you did not do, and why.
 - **Where the time went:** what took longest or went wrong (failing runs, searching, a missing

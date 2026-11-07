@@ -22,11 +22,13 @@ def hook(script: str, event: dict[str, Any], **env: str) -> subprocess.Completed
     )
 
 
-def edit(tmp_path: Path, agent: str | None = "agent-harness:implementer") -> dict[str, Any]:
+def edit(
+    tmp_path: Path, agent: str | None = "agent-harness:implementer", file: Path | None = None
+) -> dict[str, Any]:
     event = {
         "hook_event_name": "PostToolUse",
         "tool_name": "Edit",
-        "tool_input": {"file_path": str(tmp_path / "src" / "shop.py")},
+        "tool_input": {"file_path": str(file or tmp_path / "src" / "shop.py")},
         "cwd": str(tmp_path),
     }
     if agent:
@@ -89,6 +91,259 @@ def test_slow_tests_time_out(tmp_path):
     )
     assert result.returncode == 2
     assert "Tests did not finish within" in result.stderr
+
+
+def git_repository(path: Path) -> Path:
+    (path / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)  # noqa: S603, S607
+    return path.resolve()
+
+
+def write_settings(repository: Path, name: str, **env: str | None) -> None:
+    (repository / ".claude").mkdir(exist_ok=True)
+    (repository / ".claude" / name).write_text(json.dumps({"env": env}))
+
+
+def reporting(label: str) -> str:
+    script = f"import os, sys; print('{label}', os.getcwd(), *sys.argv[1:]); sys.exit(1)"
+    return f'{sys.executable} -c "{script}" {{file}}'
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_a_file_in_another_repository_runs_that_repositorys_tests(tmp_path, local):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    write_settings(platform, "settings.json", HARNESS_TEST_COMMAND=reporting("shared"))
+    if local:
+        write_settings(platform, "settings.local.json", HARNESS_TEST_COMMAND=reporting("local"))
+    event = edit(project, file=platform / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(project),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.startswith("Tests failed after editing src/feed.py")
+    label = "local" if local else "shared"
+    assert result.stderr.splitlines()[-1] == f"{label} {platform} src/feed.py"
+
+
+def test_another_repository_sets_its_own_timeout(tmp_path):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    slow = f"{sys.executable} -c 'import time; time.sleep(5)'"
+    write_settings(platform, "settings.json", HARNESS_TEST_COMMAND=slow)
+    write_settings(platform, "settings.local.json", HARNESS_TEST_TIMEOUT="0.5")
+    event = edit(project, file=platform / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        HARNESS_TEST_TIMEOUT="300",
+        CLAUDE_PROJECT_DIR=str(project),
+    )
+
+    assert result.returncode == 2
+    assert "Tests did not finish within" in result.stderr
+
+
+@pytest.mark.parametrize("null", [False, True])
+def test_another_repository_without_a_test_command_runs_no_tests(tmp_path, null):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    if null:
+        write_settings(platform, "settings.json", HARNESS_TEST_COMMAND=None)
+    event = edit(project, file=platform / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(project),
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert output["hookEventName"] == "PostToolUse"
+    notice = output["additionalContext"]
+    assert notice.startswith(
+        f"No tests ran after editing src/feed.py because {platform} sets no HARNESS_TEST_COMMAND"
+    )
+    assert "so the team lead can decide whether to run them" in notice
+    assert "yourself" not in notice
+
+
+def test_no_test_command_anywhere_stays_silent(tmp_path):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    event = edit(project, file=platform / "src" / "feed.py")
+
+    result = hook("run_tests.py", event, HARNESS_TEST_COMMAND="", CLAUDE_PROJECT_DIR=str(project))
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "broken",
+    ["{not json", json.dumps({"env": ["HARNESS_TEST_COMMAND"]}), json.dumps(["env"])],
+)
+def test_unusable_settings_in_another_repository_are_skipped(tmp_path, broken):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    write_settings(platform, "settings.json", HARNESS_TEST_COMMAND=reporting("shared"))
+    (platform / ".claude" / "settings.local.json").write_text(broken)
+    event = edit(project, file=platform / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(project),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.splitlines()[-1] == f"shared {platform} src/feed.py"
+
+
+def test_a_null_setting_in_another_repository_is_ignored(tmp_path):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    write_settings(platform, "settings.json", HARNESS_TEST_COMMAND=reporting("shared"))
+    write_settings(platform, "settings.local.json", HARNESS_TEST_COMMAND=None)
+    event = edit(project, file=platform / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(project),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.splitlines()[-1] == f"shared {platform} src/feed.py"
+
+
+@pytest.mark.parametrize("timeout", ["abc", "nan", "inf", "-1", "0"])
+@pytest.mark.parametrize("repository", ["project", "platform"])
+def test_an_invalid_timeout_falls_back_to_the_default(tmp_path, repository, timeout):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    write_settings(
+        platform,
+        "settings.json",
+        HARNESS_TEST_COMMAND=reporting("platform"),
+        HARNESS_TEST_TIMEOUT=timeout,
+    )
+    event = edit(project, file=tmp_path / repository / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        HARNESS_TEST_TIMEOUT=timeout,
+        CLAUDE_PROJECT_DIR=str(project),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.startswith("Tests failed after editing src/feed.py")
+
+
+def test_without_git_an_edit_runs_the_session_tests(tmp_path):
+    project = git_repository(tmp_path / "project")
+    platform = git_repository(tmp_path / "platform")
+    write_settings(platform, "settings.json", HARNESS_TEST_COMMAND=reporting("platform"))
+    (tmp_path / "empty").mkdir()
+    event = edit(project, file=platform / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(project),
+        PATH=str(tmp_path / "empty"),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.splitlines()[-1] == f"session {project} ../platform/src/feed.py"
+
+
+def test_a_repository_nested_in_the_session_runs_the_session_tests(tmp_path):
+    project = git_repository(tmp_path / "project")
+    nested = git_repository(project / "vendor" / "platform")
+    write_settings(nested, "settings.json", HARNESS_TEST_COMMAND=reporting("nested"))
+    event = edit(project, file=nested / "src" / "feed.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(project),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.splitlines()[-1] == f"session {project} vendor/platform/src/feed.py"
+
+
+@pytest.mark.parametrize("linked", ["session", "file"])
+def test_a_symlinked_session_directory_keeps_the_file_relative(tmp_path, linked):
+    project = git_repository(tmp_path / "project")
+    link = tmp_path / "link"
+    link.symlink_to(project, target_is_directory=True)
+    session, edited = (link, project) if linked == "session" else (project, link)
+    event = edit(session, file=edited / "src" / "shop.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(session),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.splitlines()[-1] == f"session {project} src/shop.py"
+
+
+@pytest.mark.parametrize("subdirectory", ["", "server"])
+def test_a_file_in_the_session_repository_runs_the_session_tests(tmp_path, subdirectory):
+    session = git_repository(tmp_path / "project") / subdirectory
+    (session / "src").mkdir(parents=True, exist_ok=True)
+    write_settings(session, "settings.json", HARNESS_TEST_COMMAND=reporting("repository"))
+    event = edit(session, file=session / "src" / "shop.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(session),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.splitlines()[-1] == f"session {session} src/shop.py"
+
+
+def test_a_file_outside_git_runs_the_session_tests(tmp_path):
+    project = git_repository(tmp_path / "project")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    event = edit(project, file=loose / "notes.py")
+
+    result = hook(
+        "run_tests.py",
+        event,
+        HARNESS_TEST_COMMAND=reporting("session"),
+        CLAUDE_PROJECT_DIR=str(project),
+        GIT_CEILING_DIRECTORIES=str(tmp_path),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.splitlines()[-1] == f"session {project} ../loose/notes.py"
 
 
 def guard(tool: str, agent: str | None = "agent-harness:jira-analyst") -> dict[str, Any] | None:
