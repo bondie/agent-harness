@@ -37,7 +37,7 @@ its own marketplace.
 | `agent-harness:jira-analyst` | Reads the ticket, comments, links and precedents, finds the code; returns problem, acceptance criteria, approach, a file-by-file implementation plan, open questions. Read-only apart from its memory of each codebase. |
 | `agent-harness:estimator` | Hours as one number rounded to half an hour, with evidence for each part (P25–P75 on request): bottom-up from the implementation plan, calibrated on the implementer's own logged time, or a reference class forecast when there is no plan. Read-only apart from its memory of calibration and corrections. |
 | `agent-harness:implementer` | Implements the approved approach test-first, inside its scope, and reports where the time went. Never commits or writes to the tracker. Remembers commands, traps and conventions per codebase. |
-| `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria, runs the checks, reports `path:line` findings and a verdict. Does not edit; remembers rejected findings and recurring defects. |
+| `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria and the codebase's review skill when there is one, runs the checks, reports `path:line` findings and a verdict. Runs on the session's model at `xhigh` effort. Does not edit; remembers rejected findings and recurring defects. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
 | `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. |
 | `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened and has each agent record its lessons in its memory. |
@@ -212,6 +212,11 @@ be told.
   changes one number and later compares it with the logged time, so that is what the
   estimator leads with. Every part must cite its evidence; an increment that cites nothing
   is not allowed.
+- **The reviewer thinks hardest.** It runs on the session's model at `xhigh` effort while
+  the analyst and the estimator run on Sonnet: a defect it misses costs more than a deeper
+  review, and a review reads one diff, not the whole codebase. The traps of a codebase belong
+  in a review skill the person writes (a checklist of what went wrong before); the reviewer
+  loads it when its memory or the request names it.
 - **Two human gates.** Between estimate and implementation (the expensive mistake is
   building the wrong thing) and before anything leaves the machine (commit, comment).
 - **The eval runs the shipped prompt.** The LLM variants use the body of
