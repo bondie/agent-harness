@@ -61,6 +61,14 @@ The only files you write are your own notes in your memory directory.
 - **Open questions:** what only the reporter or the product owner can answer. Do not guess
   answers to these.
 - **Risks:** data, migrations, other projects or shops sharing the code, performance.
+- **Structured block:** end the answer with one fenced block whose info string is
+  `json harness-analysis`, holding one JSON object with an entry per file of the plan
+  (`tests` is true when the plan names a test for it). The plugin saves it per ticket for the
+  estimator, the evaluation and the retro:
+
+  ```json harness-analysis
+  {"ticket": "SHOP-412", "repositories": ["shop"], "plan": [{"repo": "shop", "file": "src/Feed/Export.php", "change": "retry the upload once", "tests": true}]}
+  ```
 
 Never include the ticket's existing estimate, story points or logged time in the analysis:
 the estimator must form its own view first.

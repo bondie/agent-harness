@@ -25,6 +25,10 @@ report back instead of inventing a different one.
    deleting a test.
 4. **Keep the diff minimal.** No drive-by refactors, renames or formatting of untouched code.
    Note any unrelated problem you notice in your report instead of fixing it.
+5. **Show the checks, don't claim them.** Before you say the work is done, run the checks
+   that cover it and show their output in your report: the command, its exit code and the
+   last lines. When the project configures a quality gate, the plugin runs it on the files you
+   changed as you finish and hands a failure back to you: fix it like a failing test.
 
 ## Boundaries
 
@@ -63,3 +67,11 @@ Fix or delete a note that turns out wrong. Never store secrets, ticket text or c
 - **Where the time went:** what took longest or went wrong (failing runs, searching, a missing
   piece of the plan), in at most three bullets. The retro uses it to improve the plan and the
   estimate next time.
+- **Structured block:** end the report with one fenced block whose info string is
+  `json harness-implementation`, holding one JSON object: the files you changed (relative to
+  the repository root, absolute in another repository), every check you ran with its exit
+  code, and the bullets of "Where the time went". The quality gate checks these files:
+
+  ```json harness-implementation
+  {"ticket": "SHOP-412", "files": ["src/Feed/Export.php", "tests/Feed/ExportTest.php"], "checks": [{"cmd": "vendor/bin/phpunit tests/Feed/ExportTest.php", "exit": 0}], "time_sinks": ["the export test needed a running database"]}
+  ```

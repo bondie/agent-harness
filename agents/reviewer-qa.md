@@ -41,6 +41,16 @@ what would hurt in production or in the next change, not to restate the diff.
   the problem and the input that triggers it, and the suggested fix in one line.
 - **Acceptance criteria:** each criterion with `met`, `not met` or `untested`.
 - **Checks:** the commands you ran and their outcome.
+- **Structured block:** end the answer with one fenced block whose info string is
+  `json harness-review`, holding one JSON object. `verdict` is `pass` (approve), `changes`
+  (changes requested) or `block` (changes requested with a blocker). Each finding has an
+  `id`, its `severity`, `file` and `line`, a one-line `summary`, its `evidence` (`test` when a
+  test or check shows it, `trace` for a log or a traced run, `code` when it comes from reading
+  the code) and `disposition: null`, which the retro fills in:
+
+  ```json harness-review
+  {"ticket": "SHOP-412", "verdict": "changes", "findings": [{"id": "F1", "severity": "major", "file": "src/Feed/Export.php", "line": 42, "summary": "retries forever on a 4xx answer", "evidence": "test", "disposition": null}]}
+  ```
 
 Style preferences are not findings unless the project's own rules (CLAUDE.md, linters)
 require them.

@@ -45,6 +45,8 @@ its own marketplace.
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
 | `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
+| `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/`. |
+| `hooks/quality_gate.py` | When **the implementer** finishes, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory. |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database ([rules](#shell-guard)). |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
@@ -56,6 +58,7 @@ flowchart LR
     E --> G1{Gate 1<br/>approve plan<br/>and estimate}
     G1 -->|implement| I[implementer]
     I -->|edit| H[[test hook]] --> I
+    I -->|finish| Q[[quality gate]] -->|fails| I
     I --> R[reviewer-qa]
     R -->|changes requested| I
     R --> G2{Gate 2<br/>commit? comment?}
@@ -94,6 +97,57 @@ Then, per project:
    that cover the change and their command, and the team lead decides whether to run them.
    The hook runs that repository's command through the shell although Claude Code itself does
    not load that repository's settings, so edit only repositories whose settings you trust.
+4. **Optionally, a quality gate** in the repository's `.claude/agent-harness.json` (see
+   [`examples/agent-harness.json`](examples/agent-harness.json) and
+   [below](#ticket-artifacts-and-the-quality-gate)).
+
+## Ticket artifacts and the quality gate
+
+**Artifacts.** When the analyst, the estimator, the implementer or the reviewer finishes,
+`hooks/save_artifacts.py` keeps what it produced in `~/.claude/agent-harness/tickets/<KEY>/`
+(`HARNESS_HOME` moves the root). The key is the first ticket key in the agent's task
+(`HARNESS_TICKET` overrides it), otherwise `adhoc-<YYYYMMDD>-<agent id>`.
+
+| File | Content |
+|---|---|
+| `index.jsonl` | One line per finished run: the agent, its id, when it ended, its report file, the kinds of its structured blocks, and under `error` the reason for each block it could not read. |
+| `<agent>.<NN>.md` | The final report of each run, numbered per agent. |
+| `<kind>.json` | The latest structured block of a kind (`analysis`, `estimate`, `review`, `implementation`); the previous one moves to `<kind>.<NN>.json`. |
+| `gates.json` | The latest quality gate result: the commands, their exit codes, durations and the last 40 lines of their output. |
+
+Each agent ends its report with one fenced block whose info string is `json harness-<kind>`;
+its prompt shows the format. A stop that a hook blocked does not end a run, so the report the
+agent gives after the fix replaces the one before. The retro reads these files instead of
+reconstructing the ticket from the conversation, and they are the data for evaluating the
+analyst's plans and the reviewer's findings.
+
+**Quality gate.** The test hook runs tests after each edit, but nothing ran the linters,
+static analysis or a CI file check before the implementer reported "checks passed". When the
+implementer finishes, `hooks/quality_gate.py` takes the files from its `harness-implementation`
+block (or, without one, the uncommitted files of its repository), runs each repository's
+checks on them and writes `gates.json`. A failure blocks the implementer from finishing (the
+`SubagentStop` decision `block`) and hands it the command and the end of its output. After two
+blocks in a row it lets the implementer finish and the gate stays failed, so a check it cannot
+fix does not loop.
+
+```json
+{ "gate": { "commands": [
+  { "cmd": "vendor/bin/phpstan analyse --no-progress {files}", "match": "\\.php$" },
+  { "cmd": "actionlint {files}", "match": "^\\.github/workflows/.+\\.ya?ml$" }
+], "timeout": 300 } }
+```
+
+- Each command runs in the repository root. `{files}` becomes the changed files whose path,
+  relative to that root, matches the regular expression `match` (all files without one). A
+  command with no matching file is skipped.
+- `timeout` is per command in seconds (default 300), and the gate as a whole stops after
+  570 s. `max_blocks` (default 2) is how many times in a row it may block.
+- `HARNESS_GATE_COMMANDS` in the `env` of the settings, as JSON (the same object or only its
+  command list), wins over the file, so a person can override the team's checks in
+  `.claude/settings.local.json`. A repository other than the session's uses its own
+  settings and file, run through the shell like its test command, so the same trust rule
+  applies.
+- Without a configuration the gate does nothing.
 
 ## Shell guard
 
