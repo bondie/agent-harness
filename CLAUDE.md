@@ -1,7 +1,7 @@
 # agent-harness
 
 A Claude Code plugin (four subagents, the `ticket`, `retro` and `stats` skills, a dynamic
-workflow, eight hook scripts, an MCP server entry) and the Python package that backtests its
+workflow, nine hook scripts, an MCP server entry) and the Python package that backtests its
 estimator and measures the team.
 
 ## Layout
@@ -14,7 +14,8 @@ estimator and measures the team.
 - `workflows/*.js`: dynamic workflows shipped with the plugin (`/agent-harness:<name>`). Plain
   JavaScript, `meta` a pure literal, no clock or randomness; `tests/test_workflows.py` checks it.
 - `hooks/`: standard-library Python scripts called by `hooks/hooks.json`: the tracker, memory
-  and shell guards (PreToolUse), `run_tests.py` (PostToolUse), `log_agent_runs.py`,
+  and shell guards (PreToolUse), `guard_runaway.py` (PreToolUse, PostToolUse and
+  PostToolUseFailure on every tool), `run_tests.py` (PostToolUse), `log_agent_runs.py`,
   `save_artifacts.py`, `quality_gate.py` and `estimate_check.py` (SubagentStop). The last two
   also run as PreToolUse on `SubagentHandback`, where auto mode delivers a report before the
   subagent stops; both paths share one block count per run. Keep them free of third-party

@@ -6,7 +6,13 @@ import pytest
 from agent_harness import artifacts, memory
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
-HOOK_MODULES = ("save_artifacts", "quality_gate", "guard_shell", "guard_memory_writes")
+HOOK_MODULES = (
+    "save_artifacts",
+    "quality_gate",
+    "guard_shell",
+    "guard_memory_writes",
+    "guard_runaway",
+)
 DEFAULT = Path("/work/home/.claude/agent-harness")
 
 
