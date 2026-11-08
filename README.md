@@ -49,6 +49,7 @@ its own marketplace.
 | `hooks/quality_gate.py` | When **the implementer** finishes, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database ([rules](#shell-guard)). |
+| `hooks/estimate_check.py` | When the estimator stops, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
 ```mermaid
@@ -386,10 +387,13 @@ What the numbers say:
   guessing; the 12B model overestimated by three hours at the median.
 - **A local model is enough.** With the same reference class, gemma4:12b on a laptop matched
   Claude Sonnet (1.37 h vs 1.36 h) at no cost; Claude cost about 0.018 USD per estimate.
-- **The prompt's anchoring rule is not followed.** It says to keep the median unless a
-  difference can be named, yet both models moved away from it on 93–95% of tickets and ended
-  up overestimating slightly more than the median itself (+0.25 to +0.50 h vs +0.31 h).
-  That is the next thing to fix, and the backtest can measure the fix.
+- **The prompt's anchoring rule is not followed, and enforcing it in code did not help.** It
+  says to keep the median unless a difference can be named, yet both models moved away from
+  it on 93–95% of tickets (71% once both are rounded to half an hour) and ended up
+  overestimating slightly more than the median itself (+0.25 to +0.50 h vs +0.31 h). With
+  the number computed by code from the median and cited adjustments, Claude kept the median
+  on 41% of tickets instead of 30%, cited a neighbour for every move, and was exactly as
+  accurate (MAE 1.37 h vs 1.34 h, p = 0.51).
 - **Keyword and hybrid retrieval tie here** (1.58 h vs 1.60 h for Claude). The tickets of one
   team share vocabulary, so BM25 finds the same neighbours.
 

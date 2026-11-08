@@ -1,10 +1,14 @@
-"""Lint and prune the agents' memory (`harness-eval memory`).
+"""Agent memory lessons: `harness-eval memory lint|prune` and the backtest's memory variants.
 
 A lesson is one bullet that ends with its source and date, and optionally an expiry:
 `- <lesson text> (source: <KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])`. Lines
 indented by two spaces continue the bullet above; headings, prose, front matter, fenced code
 and the index links in `MEMORY.md` are not lessons. The parsing mirrors
 `hooks/guard_memory_writes.py`, which runs without this package; a test keeps them in step.
+
+A backtest may show a ticket only the lessons learned before it was created and not yet
+expired: the memory holds calibration from tickets that are in the test set, and a lesson
+without a date cannot be placed in time, so it is left out.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -47,6 +52,35 @@ class Lesson:
     source: str | None
     day: date | None
     expires: date | None
+
+    @property
+    def plain(self) -> str:
+        """The lesson on one line, without its bullet marker."""
+        return " ".join(line.strip() for line in self.text.splitlines())[1:].strip()
+
+    def usable_on(self, day: date) -> bool:
+        """Learned before `day` and not expired by then."""
+        if self.day is None or self.day >= day:
+            return False
+        return self.expires is None or day < self.expires
+
+
+@dataclass(frozen=True)
+class Memory:
+    lessons: tuple[Lesson, ...]
+
+    @property
+    def dated(self) -> int:
+        return sum(1 for lesson in self.lessons if lesson.day is not None)
+
+    @property
+    def undated(self) -> int:
+        return len(self.lessons) - self.dated
+
+    def usable_on(self, created: str) -> list[Lesson]:
+        """The lessons a ticket created at `created` (ISO date or timestamp) may see."""
+        day = date.fromisoformat(created[:10])
+        return [lesson for lesson in self.lessons if lesson.usable_on(day)]
 
 
 @dataclass
@@ -166,6 +200,29 @@ def _exists(path: Path) -> bool:
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="surrogateescape")
+
+
+def load_memory(directory: Path) -> Memory:
+    """Every lesson in the Markdown files of one agent's memory directory."""
+    if not directory.is_dir():
+        raise ValueError(f"No memory directory at {directory}")
+    found = [
+        lesson
+        for path in sorted(directory.rglob("*.md"))
+        if path.is_file()
+        for lesson in lessons(_read(path), path.name == INDEX)
+    ]
+    return Memory(tuple(found))
+
+
+def memory_section(usable: Iterable[Lesson]) -> str:
+    """The lessons as they would be loaded into the agent's prompt, or nothing."""
+    lines = [f"- {lesson.plain}" for lesson in usable]
+    if not lines:
+        return ""
+    return "\n\n## Your memory\n\nLessons recorded before this ticket was created:\n\n" + "\n".join(
+        lines
+    )
 
 
 def lint_file(path: Path, settings: Settings, today: date) -> FileReport:

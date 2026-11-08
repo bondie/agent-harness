@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 
-from .metrics import Prediction, Summary, compare, summarize
+from .llm import REJECTED, REJECTED_UNCITED, STRUCTURED
+from .metrics import Prediction, Summary, compare, share_at_reference, summarize
 from .runner import Record
 
 HEADER = (
@@ -143,9 +144,47 @@ def _notes(runs: Mapping[str, Sequence[Record]], ids: Sequence[str]) -> str:
             f"- {variant}: {len(records)} tickets, {failed} without an estimate, "
             f"{redacted} with estimates masked in the text, "
             f"{seconds:.1f} s per ticket"
+            + _anchoring(records)
+            + _rejections(variant, records)
+            + _memory(records)
         )
     lines.append(f"- Compared on {len(ids)} tickets estimated by every variant.")
     return "\n".join(lines)
+
+
+def _anchoring(records: Sequence[Record]) -> str:
+    pairs = [
+        (record.median, record.reference_median)
+        for record in records
+        if record.median is not None and record.reference_median is not None
+    ]
+    if not pairs:
+        return ""
+    return (
+        f"; {share_at_reference(pairs):.0%} of {len(pairs)} estimates at the reference median "
+        "(both rounded to 0.5 h)"
+    )
+
+
+def _rejections(variant: str, records: Sequence[Record]) -> str:
+    if STRUCTURED not in variant:
+        return ""
+    rejected = sum(1 for record in records if record.error.startswith((REJECTED, REJECTED_UNCITED)))
+    uncited = sum(1 for record in records if record.error.startswith(REJECTED_UNCITED))
+    return (
+        f"; {rejected} rejected by the estimate check, {uncited} of them for an uncited adjustment"
+    )
+
+
+def _memory(records: Sequence[Record]) -> str:
+    used = [record for record in records if record.lessons is not None]
+    if not used:
+        return ""
+    lessons = [record.lessons or 0 for record in used]
+    return (
+        f"; memory: {sum(lessons) / len(lessons):.1f} lessons per ticket (at most {max(lessons)}) "
+        f"of {used[0].lessons_dated} dated, {used[0].lessons_undated} without a date left out"
+    )
 
 
 def _mean(records: Sequence[Record], value: Callable[[Record], float]) -> float:

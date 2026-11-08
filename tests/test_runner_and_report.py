@@ -9,7 +9,7 @@ from ticket_precedent.search import Searcher
 from agent_harness import cli
 from agent_harness.baselines import Estimate, HumanEstimate, NeighbourMedian
 from agent_harness.dataset import load_targets
-from agent_harness.llm import LLMError
+from agent_harness.llm import LLMError, LLMEstimator
 from agent_harness.report import project_labels, report
 from agent_harness.runner import Record, load_records, load_run, run, run_file
 
@@ -171,3 +171,93 @@ def test_cli_builds_llm_variants_for_every_backend(store, tmp_path):
         "llm-hybrid-recent@ollama-gemma4:12b",
         "human",
     ]
+
+
+class Rejecting:
+    name = "llm-hybrid-recent-structured@fake"
+
+    def estimate(self, target):
+        if target.key == "SHOP-5":
+            raise LLMError("rejected, uncited adjustment: adjustments[0] has no citation", 0.02)
+        if target.key == "SHOP-6":
+            raise LLMError("rejected: mode must be one of", 0.01)
+        return Estimate(
+            median=target.actual_hours,
+            reference_median=1.0,
+            lessons=1 if target.key == "SHOP-4" else 0,
+            lessons_dated=3,
+            lessons_undated=40,
+        )
+
+
+def test_a_rejected_estimate_is_a_failure_that_keeps_its_cost(tmp_path, targets):
+    run([Rejecting()], targets, tmp_path)
+
+    records = {r.id: r for r in load_records(run_file(tmp_path, Rejecting.name))}
+
+    assert records["acme-jira/SHOP-5"].error.startswith("rejected, uncited")
+    assert records["acme-jira/SHOP-5"].cost_usd == 0.02
+    assert records["acme-jira/SHOP-4"].reference_median == 1.0
+    assert records["acme-jira/SHOP-4"].lessons == 1
+
+
+def test_run_notes_show_anchoring_rejections_and_memory(tmp_path, targets):
+    run([Rejecting(), Flaky()], targets, tmp_path)
+
+    notes = report(load_run(tmp_path)).split("## Run notes")[1]
+
+    structured = next(line for line in notes.splitlines() if Rejecting.name in line)
+    assert "; 20% of 5 estimates at the reference median" in structured
+    assert "; 2 rejected by the estimate check, 1 of them for an uncited adjustment" in structured
+    assert (
+        "; memory: 0.2 lessons per ticket (at most 1) of 3 dated, 40 without a date left out"
+        in structured
+    )
+    flaky = next(line for line in notes.splitlines() if line.startswith("- flaky"))
+    assert "reference median" not in flaky
+    assert "rejected" not in flaky
+    assert "memory" not in flaky
+
+
+def run_args(tmp_path, *extra):
+    base = ["run", "--out", str(tmp_path), "--from", "2026-01-01", "--to", "2027-01-01"]
+    return cli._parser().parse_args([*base, *extra])
+
+
+def test_cli_builds_structured_and_memory_variants(store, tmp_path):
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "MEMORY.md").write_text("- a lesson (source: retro, 2026-01-05)\n- undated\n")
+    variants = "llm-hybrid-recent,llm-hybrid-recent-structured,llm-hybrid-recent-structured+memory"
+    args = run_args(tmp_path, "--variants", variants, "--backend", "ollama")
+    args.memory = memory
+
+    estimators = cli.build_estimators(args, _searcher(store))
+
+    assert [e.name for e in estimators] == [
+        "llm-hybrid-recent@ollama-gemma4:12b",
+        "llm-hybrid-recent-structured@ollama-gemma4:12b",
+        "llm-hybrid-recent-structured+memory@ollama-gemma4:12b",
+    ]
+    llm = [estimator for estimator in estimators if isinstance(estimator, LLMEstimator)]
+    assert len(llm) == 3
+    old, structured, with_memory = llm
+    assert not old.structured
+    assert structured.structured
+    assert structured.memory is None
+    assert with_memory.memory is not None
+    assert (with_memory.memory.dated, with_memory.memory.undated) == (1, 1)
+    assert with_memory.since == "2026-01-01"
+
+
+def test_cli_memory_errors(config_file, tmp_path, capsys):
+    base = ["run", "--out", str(tmp_path / "r"), "--from", "2026-01-01", "--to", "2027-01-01"]
+    base += ["--config", str(config_file), "--backend", "ollama"]
+
+    assert cli.main([*base, "--variants", "llm-hybrid-structured+memory"]) == 1
+    assert "needs --memory DIR" in capsys.readouterr().err
+    missing = str(tmp_path / "missing")
+    assert cli.main([*base, "--variants", "llm-hybrid+memory", "--memory", missing]) == 1
+    assert "No memory directory" in capsys.readouterr().err
+    assert cli.main([*base, "--variants", "llm-guess-structured"]) == 1
+    assert "Unknown variant" in capsys.readouterr().err

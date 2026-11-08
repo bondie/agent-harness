@@ -13,6 +13,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from .estimate_check import round_half
+
 Floats = NDArray[np.float64]
 
 
@@ -112,6 +114,18 @@ def relative_width(predictions: Sequence[Prediction]) -> float:
         if p.p25 is not None and p.p75 is not None and p.median > 0
     ]
     return float(np.median(widths))
+
+
+def at_reference(estimate: float, reference: float) -> bool:
+    """The estimate kept the reference median: both round to the same half hour."""
+    return round_half(estimate) == round_half(reference)
+
+
+def share_at_reference(pairs: Sequence[tuple[float, float]]) -> float:
+    """Share of (estimate, reference median) pairs where the estimate kept the median."""
+    if not pairs:
+        raise ValueError("Nothing to compare")
+    return float(np.mean([at_reference(estimate, median) for estimate, median in pairs]))
 
 
 @dataclass(frozen=True)

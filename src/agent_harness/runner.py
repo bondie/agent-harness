@@ -37,6 +37,10 @@ class Record:
     seconds: float = 0.0
     note: str = ""
     error: str = ""
+    reference_median: float | None = None
+    lessons: int | None = None
+    lessons_dated: int | None = None
+    lessons_undated: int | None = None
 
     @classmethod
     def load(cls, line: str) -> Record:
@@ -87,7 +91,8 @@ def predict(estimator: Estimator, target: Target, clock: Callable[[], float]) ->
     try:
         estimate = estimator.estimate(target)
     except RECOVERABLE as error:
-        return _replace(base, seconds=clock() - started, error=str(error)[:500])
+        cost = error.cost_usd if isinstance(error, LLMError) else 0.0
+        return _replace(base, seconds=clock() - started, error=str(error)[:500], cost_usd=cost)
     seconds = clock() - started
     if estimate is None:
         return _replace(base, seconds=seconds, error="no estimate")
@@ -100,6 +105,10 @@ def predict(estimator: Estimator, target: Target, clock: Callable[[], float]) ->
         cost_usd=estimate.cost_usd,
         seconds=seconds,
         note=estimate.note,
+        reference_median=estimate.reference_median,
+        lessons=estimate.lessons,
+        lessons_dated=estimate.lessons_dated,
+        lessons_undated=estimate.lessons_undated,
     )
 
 

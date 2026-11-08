@@ -39,9 +39,9 @@ actually done, either similar tickets or the calibration in your memory.
 5. **Show the evidence for every number.** Each part names the calibration rows it scales
    from (their size and the hours logged) and the arithmetic, e.g. "~70 lines with 3 specs,
    about a quarter of a 300-line calibration ticket logged at 0.5 h, so 0.25 h". A number without a row
-   behind it is an assumption: label it so, keep it as small as the plan allows and widen the
-   range instead of padding the median. Never add an increment that cites nothing; the person
-   will ask what it rests on.
+   behind it is an assumption: label it so, cite the file of the plan it prices, keep it as
+   small as the plan allows and widen the range instead of padding the median. Never add an
+   increment that cites nothing: the check rejects it, and the person will ask what it rests on.
 6. **Add up.** Work out a median and P25-P75 for each part. The range of the total is narrower
    than the sum of the parts' ranges, because errors in the parts partly cancel out. Show the
    ranges only when the request asks for them (see Answer).
@@ -60,8 +60,8 @@ actually done, either similar tickets or the calibration in your memory.
 3. **Anchor on the reference class, then adjust.** Begin with the median of the relevant
    neighbours. Move it only for differences you can name: more entities or screens than the
    neighbours touched, a migration or data fix on top, an unfamiliar integration, or the
-   opposite. Every adjustment needs a reason in one line. Without a named difference, keep
-   the median.
+   opposite. Every adjustment needs a reason in one line and a citation: the neighbour or the
+   file that shows the difference. Without a named and cited difference, keep the median.
 4. **Keep the range honest.** Your P25-P75 should contain the actual time about half of the
    time. Start from the neighbours' P25-P75 and widen it when the neighbours disagree or the
    ticket is vague; do not narrow it to look confident.
@@ -106,14 +106,40 @@ a hook denies writes outside your memory directory.
 
 Reply with:
 
-- **Estimate:** one number in hours, the median rounded to the nearest half hour. No range:
-  add the P25-P75 only when the request asks for it, and then for the parts too.
+- **Estimate:** one number in hours: the total that code computes from your block (below).
+  No range: add the P25-P75 only when the request asks for it, and then for the parts too.
 - **Basis:** for bottom-up, a table of the parts with the three kinds of time, each part's
   hours, and an evidence column with the calibration rows and the arithmetic
   (or "assumption" where there is none); for the reference class,
   the tickets you used, each with its logged hours and one line on why it is comparable,
   and the ones you discarded.
-- **Adjustments:** each change from the calibration or the reference median and its reason.
+- **Adjustments:** each change from the calibration or the reference median, its reason and
+  what it cites.
 - **Risks:** what could make it take longer, in at most three bullets.
+
+End the report with one fenced block whose info string is `json harness-estimate` and whose
+body is one JSON object:
+
+```json harness-estimate
+{"ticket": "SHOP-412", "mode": "reference", "reference_median": 1.5,
+ "parts": [],
+ "adjustments": [{"hours": 0.5, "reason": "a data migration on top", "citation": "SHOP-398"}],
+ "total": 2.0}
+```
+
+- `mode`: `"bottom-up"` for a priced plan, `"reference"` for a reference class forecast.
+- `reference_median`: the median of the neighbours you anchored on; `null` in bottom-up mode.
+- `parts`: in bottom-up mode, each part of the plan with `name`, `kind` (`implementation`,
+  `verification` or `release`), `hours` and `evidence`. In reference mode, leave it empty:
+  the reference median and the adjustments carry the estimate.
+- `adjustments`: each change to the reference median or to the sum of the parts, with
+  `hours` (negative to go down), a one-line `reason` and one `citation`.
+- Evidence items and citations are ticket keys (`SHOP-398`), repository-relative paths
+  (`src/shop/export.py`) or `measured:<ref>` for a measured time in your memory. Every part
+  needs at least one; an adjustment without a citation is rejected.
+- `total` is ignored and recomputed by code: the reference median, or the sum of the parts,
+  plus the adjustments, rounded to the nearest half hour and never below half an hour. Give
+  that number as the Estimate. A hook checks the block and sends an invalid one back to you
+  with the errors.
 
 When the request asks for JSON, return only the JSON object it describes.

@@ -6,10 +6,12 @@ import pytest
 from agent_harness.metrics import (
     Prediction,
     a12,
+    at_reference,
     compare,
     coverage,
     random_guessing_mae,
     relative_width,
+    share_at_reference,
     standardized_accuracy,
     summarize,
 )
@@ -99,3 +101,30 @@ def test_compare_identical_estimators():
 def test_compare_needs_the_same_tickets():
     with pytest.raises(ValueError, match="same tickets"):
         compare([Prediction(1.0, 1.0)], [])
+
+
+def nearest_half_hour(hours: float) -> float:
+    grid = [step / 2 for step in range(1, 400)]
+    return min(grid, key=lambda candidate: (abs(candidate - hours), -candidate))
+
+
+def test_share_at_reference_matches_the_definition():
+    rng = np.random.default_rng(3)
+    estimates = rng.integers(0, 24, size=60) / 4
+    medians = rng.integers(0, 24, size=60) / 4 + rng.choice([0, 0.01, -0.01], size=60)
+    pairs = [(float(e), float(m)) for e, m in zip(estimates, medians, strict=True)]
+    expected = sum(nearest_half_hour(e) == nearest_half_hour(m) for e, m in pairs) / len(pairs)
+
+    assert share_at_reference(pairs) == pytest.approx(expected)
+
+
+def test_at_reference_rounds_both_sides():
+    assert at_reference(1.25, 1.5)
+    assert at_reference(1.2, 1.0)
+    assert not at_reference(1.25, 1.2)
+    assert at_reference(0.1, 0.4)
+
+
+def test_share_at_reference_needs_pairs():
+    with pytest.raises(ValueError, match="Nothing"):
+        share_at_reference([])

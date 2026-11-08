@@ -29,7 +29,8 @@ from .artifacts import (
 from .baselines import EraScaledMedian, Estimator, HumanEstimate, NeighbourMedian
 from .dataset import load_targets, sample
 from .gitlog import DEFAULT_TEST_PATTERNS, changes, diff, resolve, ticket_of
-from .llm import Backend, ClaudeCode, LLMEstimator, Ollama
+from .llm import STRUCTURED, WITH_MEMORY, Backend, ClaudeCode, LLMEstimator, Ollama
+from .memory import Memory, load_memory
 from .report import report
 from .runner import load_run, run
 
@@ -62,7 +63,9 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument(
         "--variants",
         default=",".join(BASELINES),
-        help=f"comma-separated: {', '.join(BASELINES + LLM_CONTEXTS)}",
+        help=f"comma-separated: {', '.join(BASELINES + LLM_CONTEXTS)}; an llm-* variant "
+        f"takes {STRUCTURED} (code computes the number from the harness-estimate block) "
+        f"and then {WITH_MEMORY} (lessons from --memory learned before the ticket)",
     )
     cmd.add_argument(
         "--backend",
@@ -77,6 +80,7 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument("--change", default="2026-01-01", help="date of a process change")
     cmd.add_argument("--process-note", help="what changed, told to the LLM variants")
     cmd.add_argument("--config", type=Path, help="ticket-precedent configuration file")
+    cmd.add_argument("--memory", type=Path, help="agent memory directory for +memory variants")
     cmd.set_defaults(handler=_run)
 
     cmd = commands.add_parser("report", help="aggregate Markdown report of a run")
@@ -189,23 +193,34 @@ def _run(args: argparse.Namespace) -> int:
 
 def build_estimators(args: argparse.Namespace, searcher: Searcher) -> list[Estimator]:
     estimators: list[Estimator] = []
+    memory: Memory | None = None
     for variant in (name.strip() for name in args.variants.split(",") if name.strip()):
-        if variant in LLM_CONTEXTS:
-            if not args.backend:
-                raise ValueError(f"{variant} needs at least one --backend")
-            estimators += [
-                LLMEstimator(
-                    backend(spec),
-                    searcher,
-                    context=variant.removeprefix("llm-").removesuffix("-recent"),
-                    k=args.k,
-                    since=args.change if variant.endswith("-recent") else None,
-                    process_note=args.process_note,
-                )
-                for spec in args.backend
-            ]
+        with_memory = variant.endswith(WITH_MEMORY)
+        context = variant.removesuffix(WITH_MEMORY)
+        structured = context.endswith(STRUCTURED)
+        context = context.removesuffix(STRUCTURED)
+        if context not in LLM_CONTEXTS:
+            estimators.append(baseline(variant, args, searcher))
             continue
-        estimators.append(baseline(variant, args, searcher))
+        if not args.backend:
+            raise ValueError(f"{variant} needs at least one --backend")
+        if with_memory and args.memory is None:
+            raise ValueError(f"{variant} needs --memory DIR")
+        if with_memory and memory is None:
+            memory = load_memory(args.memory)
+        estimators += [
+            LLMEstimator(
+                backend(spec),
+                searcher,
+                context=context.removeprefix("llm-").removesuffix("-recent"),
+                k=args.k,
+                since=args.change if context.endswith("-recent") else None,
+                process_note=args.process_note,
+                structured=structured,
+                memory=memory if with_memory else None,
+            )
+            for spec in args.backend
+        ]
     return estimators
 
 
