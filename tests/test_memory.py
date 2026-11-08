@@ -1,13 +1,14 @@
 import importlib.util
+import itertools
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 from agent_harness import cli, memory
-from agent_harness.memory import Settings
+from agent_harness.memory import Lesson, Memory, Settings, load_memory, memory_section
 
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "guard_memory_writes.py"
 TODAY = date(2026, 3, 1)
@@ -279,3 +280,115 @@ def test_prune_needs_the_expired_flag_and_a_directory(tmp_path, capsys):
         cli.main(["memory", "prune", "--dir", str(tmp_path)])
     assert cli.main(["memory", "prune", "--expired", "--dir", str(tmp_path / "missing")]) == 1
     assert "No memory directory" in capsys.readouterr().err
+
+
+BACKTEST_MEMORY = """---
+name: estimator memory
+description: calibration
+---
+
+# Estimator memory
+
+- [Release timings](release.md) — per package
+- Release takes about 1 min per package (source: retro, 2026-02-10)
+- Bumps run in parallel, a few minutes each
+  (source: SHOP-412, 2026-03-01, expires 2026-06-01)
+* A trailing period breaks the format (source: MR, 2026-04-01).
+- A lesson dated in the middle (source: retro, 2026-01-01) is not in the contract format
+- Correction (2026-05-01): a date in the text is not a source tag
+
+| Ticket | Hours |
+|---|---|
+| SHOP-1 | 2 |
+
+```text
+- not a lesson (source: retro, 2026-01-01)
+```
+  an indented line after a code block belongs to nothing
+"""
+
+
+def test_the_backtest_reads_dated_lessons_on_one_line():
+    found = memory.lessons(BACKTEST_MEMORY, index=True)
+
+    assert [(lesson.day, lesson.expires) for lesson in found] == [
+        (date(2026, 2, 10), None),
+        (date(2026, 3, 1), date(2026, 6, 1)),
+        (None, None),
+        (None, None),
+        (None, None),
+    ]
+    assert found[1].plain == (
+        "Bumps run in parallel, a few minutes each (source: SHOP-412, 2026-03-01, expires "
+        "2026-06-01)"
+    )
+    assert found[2].plain.startswith("A trailing period")
+
+
+def made(text: str, day: str | None = None, expires: str | None = None) -> Lesson:
+    def parsed(value: str | None) -> date | None:
+        return date.fromisoformat(value) if value else None
+
+    return Lesson(1, 1, f"- {text}", "retro" if day else None, parsed(day), parsed(expires))
+
+
+def brute_force_usable(lesson: Lesson, day: date) -> bool:
+    if lesson.day is None:
+        return False
+    expires = lesson.expires or date.max
+    return lesson.day < day < expires
+
+
+LESSONS = [
+    made("undated"),
+    made("early", "2026-01-10"),
+    made("expiring", "2026-01-10", "2026-01-20"),
+    made("late", "2026-02-01"),
+]
+
+
+@pytest.mark.parametrize(("lesson", "offset"), list(itertools.product(LESSONS, range(40))))
+def test_a_ticket_sees_only_lessons_learned_before_it_and_not_expired(lesson, offset):
+    day = date(2026, 1, 1) + timedelta(days=offset)
+    assert lesson.usable_on(day) == brute_force_usable(lesson, day)
+
+
+def test_memory_filters_by_the_tickets_creation_day():
+    agent_memory = Memory(tuple(LESSONS))
+
+    assert agent_memory.dated == 3
+    assert agent_memory.undated == 1
+    assert agent_memory.usable_on("2026-01-10T23:59:00+00:00") == []
+    assert [lesson.plain for lesson in agent_memory.usable_on("2026-01-15T08:00:00+00:00")] == [
+        "early",
+        "expiring",
+    ]
+    assert [lesson.plain for lesson in agent_memory.usable_on("2026-03-01")] == [
+        "early",
+        "late",
+    ]
+
+
+def test_load_memory_reads_every_markdown_file(tmp_path):
+    (tmp_path / "MEMORY.md").write_text(BACKTEST_MEMORY)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "topic.md").write_text("- topic lesson (source: retro, 2026-01-05)\n")
+    (tmp_path / "notes.txt").write_text("- ignored (source: retro, 2026-01-05)\n")
+    (tmp_path / "index.md").write_text("- [Link](other.md) — a lesson outside MEMORY.md\n")
+
+    agent_memory = load_memory(tmp_path)
+
+    assert (agent_memory.dated, agent_memory.undated) == (3, 4)
+
+
+def test_load_memory_needs_a_directory(tmp_path):
+    with pytest.raises(ValueError, match="No memory directory"):
+        load_memory(tmp_path / "missing")
+
+
+def test_memory_section():
+    assert memory_section([]) == ""
+    wrapped = memory.lessons("- early\n  wrapped (source: retro, 2026-01-10)")
+    assert memory_section(wrapped).endswith(
+        "before this ticket was created:\n\n- early wrapped (source: retro, 2026-01-10)"
+    )

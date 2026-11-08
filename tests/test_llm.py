@@ -5,9 +5,13 @@ from pathlib import Path
 import httpx
 import pytest
 
+from agent_harness.baselines import NeighbourMedian
 from agent_harness.dataset import load_targets
 from agent_harness.llm import (
     AGENT_FILE,
+    ESTIMATE_SCHEMA,
+    REJECTED,
+    REJECTED_UNCITED,
     SCHEMA,
     ClaudeCode,
     LLMError,
@@ -15,8 +19,10 @@ from agent_harness.llm import (
     Ollama,
     agent_prompt,
     parse_estimate,
+    parse_structured,
     redact_estimates,
 )
+from agent_harness.memory import Memory, lessons
 
 ANSWER = {
     "median_hours": 1.5,
@@ -27,15 +33,27 @@ ANSWER = {
 }
 
 
+BLOCK = {
+    "ticket": "SHOP-6",
+    "mode": "reference",
+    "reference_median": 1.0,
+    "parts": [],
+    "adjustments": [{"hours": 0.5, "reason": "two exports", "citation": "SHOP-5"}],
+    "total": 9,
+}
+
+
 class Recorder:
     name = "fake"
 
     def __init__(self, answer=None):
         self.answer = answer or ANSWER
         self.calls = []
+        self.schemas = []
 
-    def complete(self, system, user):
+    def complete(self, system, user, schema=SCHEMA):
         self.calls.append((system, user))
+        self.schemas.append(schema)
         return self.answer, 0.01
 
 
@@ -199,3 +217,129 @@ def test_ollama_failures(content):
 def test_backend_names():
     assert ClaudeCode(model="sonnet").name == "claude-sonnet"
     assert Ollama(model="gemma4:12b").name == "ollama-gemma4:12b"
+
+
+def recent_median(searcher, ticket):
+    baseline = NeighbourMedian(searcher, since="2026-01-01").estimate(ticket)
+    assert baseline is not None
+    return baseline.median
+
+
+def test_the_old_variant_records_the_reference_median(store, searcher):
+    shop = target(store, "SHOP-6")
+    estimate = LLMEstimator(Recorder(), searcher, since="2026-01-01").estimate(shop)
+    assert estimate is not None
+    assert estimate.reference_median == recent_median(searcher, shop)
+    assert estimate.lessons is None
+    assert LLMEstimator(Recorder(), searcher, context="none").estimate(
+        target(store, "SHOP-6")
+    ) == parse_estimate(ANSWER, 0.01)
+
+
+def test_the_structured_variant_lets_code_compute_the_estimate(store, searcher):
+    backend = Recorder(BLOCK)
+    estimator = LLMEstimator(backend, searcher, since="2026-01-01", structured=True)
+
+    shop = target(store, "SHOP-6")
+    estimate = estimator.estimate(shop)
+
+    assert estimate is not None
+    assert estimator.name == "llm-hybrid-recent-structured@fake"
+    assert (estimate.median, estimate.p25, estimate.p75) == (1.5, None, None)
+    assert estimate.cited == ("SHOP-5",)
+    assert estimate.reference_median == recent_median(searcher, shop)
+    assert backend.schemas == [ESTIMATE_SCHEMA]
+    system = backend.calls[0][0]
+    assert "harness-estimate block only" in system
+    assert "median_hours" not in system
+
+
+def test_an_uncited_adjustment_fails_with_its_cost():
+    block = {**BLOCK, "adjustments": [{"hours": 1, "reason": "bigger", "citation": ""}]}
+    with pytest.raises(LLMError, match=f"^{REJECTED_UNCITED}") as failure:
+        parse_structured(block, 0.02)
+    assert failure.value.cost_usd == 0.02
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**BLOCK, "reference_median": None},
+        {**BLOCK, "mode": "bottom-up", "parts": []},
+        {**BLOCK, "adjustments": [{"hours": 1, "reason": "x", "citation": "see above"}]},
+        {"median_hours": 2},
+    ],
+)
+def test_other_invalid_blocks_fail_as_rejected(payload):
+    with pytest.raises(LLMError, match=f"^{REJECTED}"):
+        parse_structured(payload, 0.0)
+
+
+def test_structured_citations_come_from_parts_and_adjustments():
+    block = {
+        **BLOCK,
+        "parts": [{"name": "a", "kind": "release", "hours": 0.5, "evidence": ["SHOP-4", "a note"]}],
+        "adjustments": [
+            {"hours": 0.5, "reason": "x", "citation": "SHOP-4"},
+            {"hours": 0.5, "reason": "y", "citation": " measured:deploy "},
+        ],
+    }
+    assert parse_structured(block, 0.0).cited == ("SHOP-4", "measured:deploy")
+
+
+def load_memory_text(text: str) -> Memory:
+    return Memory(tuple(lessons(text)))
+
+
+def test_the_memory_variant_adds_only_lessons_from_before_the_ticket(store, searcher):
+    memory = load_memory_text(
+        "- Release is minutes (source: retro, 2026-02-01)\n"
+        "- Learned on the day (source: retro, 2026-03-01)\n"
+        "- Expired (source: retro, 2026-01-02, expires 2026-02-01)\n"
+        "- No date\n"
+    )
+    backend = Recorder(BLOCK)
+    estimator = LLMEstimator(backend, searcher, structured=True, memory=memory)
+
+    estimate = estimator.estimate(target(store, "SHOP-6"))
+
+    assert estimate is not None
+    assert estimator.name == "llm-hybrid-structured+memory@fake"
+    assert (estimate.lessons, estimate.lessons_dated, estimate.lessons_undated) == (1, 3, 1)
+    system = backend.calls[0][0]
+    assert system.endswith("\n\n- Release is minutes (source: retro, 2026-02-01)")
+    assert "Learned on the day" not in system
+    assert "No date" not in system
+
+
+def test_a_memory_without_usable_lessons_leaves_the_prompt_alone(store, searcher):
+    backend = Recorder(BLOCK)
+    memory = load_memory_text("- No date\n")
+    LLMEstimator(backend, searcher, structured=True, memory=memory).estimate(
+        target(store, "SHOP-6")
+    )
+    plain = Recorder(BLOCK)
+    LLMEstimator(plain, searcher, structured=True).estimate(target(store, "SHOP-6"))
+    assert backend.calls == plain.calls
+
+
+def test_backends_send_the_schema_they_are_given():
+    calls = []
+
+    def runner(command, **options):
+        calls.append(command)
+        return completed(json.dumps({"structured_output": BLOCK}))
+
+    ClaudeCode(runner=runner).complete("system", "ticket", ESTIMATE_SCHEMA)
+    assert json.loads(calls[0][calls[0].index("--json-schema") + 1]) == ESTIMATE_SCHEMA
+    requests: list[httpx.Request] = []
+    ollama_with(json.dumps(BLOCK), requests).complete("system", "ticket", ESTIMATE_SCHEMA)
+    assert json.loads(requests[0].content)["format"] == ESTIMATE_SCHEMA
+
+
+def test_a_failed_claude_call_keeps_its_cost():
+    stdout = json.dumps({"is_error": True, "result": "limit", "total_cost_usd": 0.03})
+    backend = ClaudeCode(runner=lambda command, **options: completed(stdout))
+    with pytest.raises(LLMError) as failure:
+        backend.complete("system", "ticket")
+    assert failure.value.cost_usd == 0.03

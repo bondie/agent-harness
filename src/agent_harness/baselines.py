@@ -23,6 +23,10 @@ class Estimate:
     cited: tuple[str, ...] = ()
     cost_usd: float = 0.0
     note: str = ""
+    reference_median: float | None = None
+    lessons: int | None = None
+    lessons_dated: int | None = None
+    lessons_undated: int | None = None
 
 
 class Estimator(Protocol):

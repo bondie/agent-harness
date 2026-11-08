@@ -313,3 +313,138 @@ _Fewer than two tickets: nothing to compare._
 | llm-none@claude-sonnet | 150 | 2.37 [1.91-2.89] | 1.50 | -0.11 | 1.33 | 15% | 43% | 1.33 | <0.001 | 0.32 | 1.27 |
 | llm-none@ollama-gemma4:12b | 150 | 6.24 [4.53-8.31] | 3.04 | -1.92 | 3.00 | 8% | 19% | 1.00 | <0.001 | 0.16 | 0.00 |
 | neighbour-median | 150 | 1.89 [1.58-2.23] | 1.30 | 0.11 | 0.90 | 15% | 46% | 1.36 | <0.001 | 0.36 | 0.00 |
+
+# 4. The estimate computed by code, and memory (Claude Sonnet, the same 150 tickets)
+
+The estimator now ends an estimate with a `json harness-estimate` block: the median it
+anchored on, and every adjustment with its hours, reason and citation (a ticket key, a
+repository-relative path or `measured:<ref>`). Code computes the number from the block (the
+median plus the adjustments, rounded to half an hour, never below half an hour) and rejects an
+adjustment without a citation. The variants run the same sample (150 tickets, seed 7), the same
+process note and the recent reference class (tickets created since 2026-01-01):
+
+- `llm-hybrid-recent`: the earlier answer format (median, P25-P75, cited keys), rerun with the
+  current prompt;
+- `llm-hybrid-recent-structured`: the `harness-estimate` block, the number computed by code;
+- `llm-hybrid-recent-structured+memory`: the same, plus the lessons in the estimator's memory
+  dated before the ticket was created and not expired.
+
+"At the reference median" counts estimates that equal the median of the reference class once
+both are rounded to half an hour, as the prompt asks. The gemma4:12b variants were not run
+this time, as a local run takes about two hours per variant; they can be added with the same
+command.
+
+| Variant (150 tickets) | MAE h [95% CI] | vs recent median p | At the reference median | Rejected by the check | Cost USD |
+|---|---:|---:|---:|---:|---:|
+| Median of 10 similar recent tickets | 1.33 [1.06-1.68] | - | - | - | 0.00 |
+| Claude Sonnet, earlier format | 1.34 [1.11-1.64] | 0.623 | 30% | - | 2.63 |
+| Claude Sonnet, number computed by code | 1.37 [1.13-1.68] | 0.299 | 41% | 0 | 1.96 |
+| … plus memory (0 lessons usable) | 1.36 [1.12-1.67] | 0.301 | 41% | 0 | 2.46 |
+
+What the numbers say:
+
+- **Computing the number in code did not change accuracy.** MAE 1.37 h against 1.34 h for
+  the earlier format (paired Wilcoxon p = 0.51, Â12 0.48); both tie the plain recent median.
+- **More estimates keep the median, most still move.** The share at the median rose from
+  30% to 41%. The rest moved mostly up (61 up, 28 down; earlier format 64 up, 41 down), on
+  average +0.33 h against +0.29 h.
+- **The check rejected nothing.** None of the 300 structured estimates had an adjustment
+  without a citation or with a malformed one: with the reference class in the prompt, naming
+  a neighbour costs the model nothing. The check makes a move name its evidence; it cannot
+  tell whether that evidence supports the move.
+- **The earlier "93-95% moved away from the median" counted exact equality.** Rounded to half
+  an hour on both sides, the November runs kept the median on 29% of tickets and this rerun
+  on 30%, so the change moved it to 41%.
+- **Memory could not be measured on past tickets.** The estimator's memory holds 45 lessons
+  and none carries a date in the lesson format (`(source: …, YYYY-MM-DD)`), so none can be
+  shown to a past ticket without leaking; they were all written after the test window
+  anyway. The `+memory` run therefore repeats the structured prompt. It changed 39 of 150
+  estimates and the MAE by 0.01 h: that is the run-to-run noise to read the other differences
+  against. Measuring memory needs dated lessons and tickets estimated after them.
+
+Total cost: 7.05 USD for 450 estimates.
+
+## 4. All variants on the tickets every variant estimated
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 150 | 1.33 [1.06-1.68] | 0.75 | 0.38 | 0.62 | 29% | 49% | 1.09 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 150 | 1.36 [1.12-1.67] | 1.00 | 0.36 | 0.70 | 21% | - | - | 0.301 | 0.45 | 2.46 |
+| llm-hybrid-recent-structured@claude-sonnet | 150 | 1.37 [1.13-1.68] | 1.00 | 0.36 | 0.67 | 19% | - | - | 0.299 | 0.44 | 1.96 |
+| llm-hybrid-recent@claude-sonnet | 150 | 1.34 [1.11-1.64] | 1.00 | 0.37 | 0.67 | 21% | 53% | 1.00 | 0.623 | 0.46 | 2.63 |
+
+## 4. By project
+
+### 4. Project A
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 61 | 1.34 [0.85-1.96] | 0.69 | 0.36 | 0.61 | 31% | 52% | 1.30 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 61 | 1.32 [0.91-1.90] | 1.00 | 0.37 | 0.67 | 23% | - | - | 0.350 | 0.45 | 1.03 |
+| llm-hybrid-recent-structured@claude-sonnet | 61 | 1.37 [0.97-1.94] | 1.00 | 0.35 | 0.67 | 16% | - | - | 0.221 | 0.42 | 0.79 |
+| llm-hybrid-recent@claude-sonnet | 61 | 1.34 [0.93-1.91] | 0.88 | 0.36 | 0.67 | 21% | 54% | 1.17 | 0.485 | 0.44 | 1.08 |
+
+### 4. Project B
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 22 | 1.08 [0.63-1.65] | 0.79 | 0.52 | 0.48 | 36% | 64% | 1.08 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 22 | 0.78 [0.56-1.03] | 0.50 | 0.65 | 0.33 | 41% | - | - | 0.408 | 0.50 | 0.36 |
+| llm-hybrid-recent-structured@claude-sonnet | 22 | 0.71 [0.48-0.97] | 0.50 | 0.68 | 0.27 | 50% | - | - | 0.206 | 0.53 | 0.24 |
+| llm-hybrid-recent@claude-sonnet | 22 | 0.85 [0.55-1.19] | 0.50 | 0.62 | 0.35 | 41% | 82% | 1.00 | 0.641 | 0.52 | 0.38 |
+
+### 4. Project C
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 19 | 2.23 [1.34-3.48] | 1.52 | 0.32 | 0.62 | 16% | 42% | 1.03 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 19 | 2.26 [1.44-3.42] | 1.50 | 0.31 | 0.67 | 16% | - | - | 0.816 | 0.49 | 0.22 |
+| llm-hybrid-recent-structured@claude-sonnet | 19 | 2.31 [1.51-3.47] | 1.50 | 0.29 | 0.67 | 16% | - | - | 0.959 | 0.47 | 0.31 |
+| llm-hybrid-recent@claude-sonnet | 19 | 2.21 [1.43-3.29] | 1.50 | 0.32 | 0.67 | 16% | 37% | 1.17 | 0.795 | 0.49 | 0.30 |
+
+### 4. Project D
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 19 | 0.97 [0.75-1.20] | 0.96 | -0.31 | 1.42 | 5% | 21% | 0.84 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 19 | 0.99 [0.78-1.22] | 1.00 | -0.34 | 1.73 | 0% | - | - | 0.632 | 0.48 | 0.27 |
+| llm-hybrid-recent-structured@claude-sonnet | 19 | 1.02 [0.77-1.28] | 1.00 | -0.37 | 1.25 | 0% | - | - | 0.702 | 0.49 | 0.30 |
+| llm-hybrid-recent@claude-sonnet | 19 | 0.91 [0.68-1.14] | 0.83 | -0.22 | 1.50 | 11% | 37% | 1.00 | 0.695 | 0.52 | 0.35 |
+
+### 4. Project E
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 15 | 1.52 [0.60-2.69] | 0.62 | 0.34 | 0.45 | 40% | 60% | 1.23 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 15 | 1.90 [1.10-2.83] | 1.00 | 0.17 | 1.00 | 13% | - | - | 0.280 | 0.36 | 0.33 |
+| llm-hybrid-recent-structured@claude-sonnet | 15 | 1.80 [1.03-2.68] | 1.00 | 0.22 | 0.60 | 13% | - | - | 0.410 | 0.37 | 0.18 |
+| llm-hybrid-recent@claude-sonnet | 15 | 1.83 [1.02-2.76] | 1.00 | 0.20 | 0.81 | 20% | 40% | 1.00 | 0.477 | 0.38 | 0.29 |
+
+### 4. Project F
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 8 | 0.61 [0.18-1.26] | 0.44 | 0.43 | 0.58 | 38% | 62% | 0.99 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 8 | 0.89 [0.50-1.40] | 0.50 | 0.18 | 1.00 | 12% | - | - | 0.219 | 0.31 | 0.14 |
+| llm-hybrid-recent-structured@claude-sonnet | 8 | 0.82 [0.59-1.06] | 0.75 | 0.23 | 1.00 | 0% | - | - | 0.422 | 0.25 | 0.07 |
+| llm-hybrid-recent@claude-sonnet | 8 | 0.82 [0.48-1.29] | 0.50 | 0.23 | 1.00 | 12% | 62% | 1.23 | 0.219 | 0.31 | 0.13 |
+
+### 4. Project G
+
+| Variant | n | MAE h [95% CI] | MdAE h | SA | MdMRE | PRED(25) | P25-P75 coverage | Relative width | vs baseline p | Â12 | Cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recent-median | 5 | 0.89 [0.24-1.54] | 0.47 | 0.16 | 0.21 | 60% | 40% | 0.69 | - | - | 0.00 |
+| llm-hybrid-recent-structured+memory@claude-sonnet | 5 | 1.51 [0.40-2.82] | 1.00 | -0.43 | 1.03 | 40% | - | - | 0.438 | 0.36 | 0.11 |
+| llm-hybrid-recent-structured@claude-sonnet | 5 | 1.61 [0.40-2.92] | 1.00 | -0.52 | 1.26 | 40% | - | - | 0.438 | 0.36 | 0.04 |
+| llm-hybrid-recent@claude-sonnet | 5 | 1.41 [0.46-2.72] | 1.00 | -0.33 | 0.58 | 20% | 60% | 1.00 | 0.438 | 0.44 | 0.09 |
+
+### 4. Project H
+
+_Fewer than two tickets: nothing to compare._
+
+## 4. Run notes
+- llm-hybrid-recent-structured@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 6.1 s per ticket; 41% of 150 estimates at the reference median (both rounded to 0.5 h); 0 rejected by the estimate check, 0 of them for an uncited adjustment
+- llm-hybrid-recent-structured+memory@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 6.1 s per ticket; 41% of 150 estimates at the reference median (both rounded to 0.5 h); 0 rejected by the estimate check, 0 of them for an uncited adjustment; memory: 0.0 lessons per ticket (at most 0) of 0 dated, 45 without a date left out
+- llm-hybrid-recent@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 5.2 s per ticket; 30% of 150 estimates at the reference median (both rounded to 0.5 h)
+- recent-median: 150 tickets, 0 without an estimate, 0 with estimates masked in the text, 0.5 s per ticket
+- Compared on 150 tickets estimated by every variant.

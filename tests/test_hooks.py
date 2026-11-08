@@ -828,3 +828,159 @@ def test_bad_input_never_blocks_the_session(tmp_path):
         check=False,
     )
     assert result.returncode == 0
+
+
+ESTIMATE = {
+    "ticket": "SHOP-412",
+    "mode": "reference",
+    "reference_median": 1.5,
+    "parts": [],
+    "adjustments": [{"hours": 0.5, "reason": "a migration on top", "citation": "SHOP-398"}],
+    "total": 2.0,
+}
+
+
+def estimate_report(**changes: Any) -> str:
+    block = json.dumps({**ESTIMATE, **changes})
+    return f"- **Estimate:** 2 h\n- **Basis:** SHOP-398\n\n```json harness-estimate\n{block}\n```\n"
+
+
+def estimator_stop(
+    tmp_path: Path, report: str | None, agent: str = "agent-harness:estimator", **fields: Any
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "s1",
+        "agent_id": "a1",
+        "agent_type": agent,
+        "stop_hook_active": False,
+        "cwd": str(tmp_path),
+        **fields,
+    }
+    if report is not None:
+        event["last_assistant_message"] = report
+    return event
+
+
+def check_estimate(tmp_path: Path, event: dict[str, Any]) -> dict[str, Any] | None:
+    result = hook("estimate_check.py", event, HARNESS_HOME=str(tmp_path / "home"))
+    assert result.returncode == 0
+    return json.loads(result.stdout) if result.stdout else None
+
+
+def test_a_valid_estimate_stops_quietly(tmp_path):
+    assert check_estimate(tmp_path, estimator_stop(tmp_path, estimate_report())) is None
+
+
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        ("- **Estimate:** 2 h\n- **Basis:** SHOP-398", "no ```json harness-estimate block"),
+        (
+            estimate_report(adjustments=[{"hours": 1, "reason": "bigger", "citation": ""}]),
+            "has no citation",
+        ),
+        (estimate_report(total=3), "Set total to 2"),
+        ("- **Estimate:** 2 h\n```json harness-estimate\n{oops\n```", "not valid JSON"),
+    ],
+)
+def test_an_invalid_estimate_goes_back_to_the_estimator(tmp_path, report, expected):
+    verdict = check_estimate(tmp_path, estimator_stop(tmp_path, report))
+    assert verdict is not None
+    assert verdict["decision"] == "block"
+    assert expected in verdict["reason"]
+    assert "Reply with the whole report again" in verdict["reason"]
+
+
+def test_the_estimator_is_sent_back_at_most_twice(tmp_path):
+    invalid = estimator_stop(tmp_path, estimate_report(total=3))
+    verdicts = [check_estimate(tmp_path, invalid) for _ in range(3)]
+
+    assert [v["decision"] for v in verdicts[:2] if v] == ["block", "block"]
+    last = verdicts[2]
+    assert last is not None
+    assert "decision" not in last
+    assert "after 2 retries" in last["systemMessage"]
+    assert "Set total to 2" in last["systemMessage"]
+    record = json.loads((tmp_path / "home" / "estimate-check" / "s1-a1.json").read_text())
+    assert record["blocks"] == 2
+
+
+def test_a_fixed_estimate_clears_the_count(tmp_path):
+    check_estimate(tmp_path, estimator_stop(tmp_path, estimate_report(total=3)))
+    assert check_estimate(tmp_path, estimator_stop(tmp_path, estimate_report())) is None
+    assert not (tmp_path / "home" / "estimate-check" / "s1-a1.json").exists()
+    verdict = check_estimate(tmp_path, estimator_stop(tmp_path, estimate_report(total=3)))
+    assert verdict is not None
+    assert verdict["decision"] == "block"
+
+
+@pytest.mark.parametrize("agent", ["agent-harness:implementer", "Explore", ""])
+def test_other_agents_are_not_checked(tmp_path, agent):
+    invalid = estimate_report(total=3)
+    assert check_estimate(tmp_path, estimator_stop(tmp_path, invalid, agent)) is None
+
+
+def test_a_reply_without_an_estimate_is_not_checked(tmp_path):
+    reply = "Added to memory:\n- Same ticket: 4 h holds when trimmed (source: retro, 2026-01-05)"
+    assert check_estimate(tmp_path, estimator_stop(tmp_path, reply, "estimator")) is None
+
+
+def estimator_transcript(tmp_path: Path, *content: dict[str, Any]) -> Path:
+    path = tmp_path / "subagents" / "agent-a1.jsonl"
+    path.parent.mkdir(exist_ok=True)
+    lines = [
+        json.dumps({"type": "user", "message": {"content": "Estimate SHOP-412"}}),
+        json.dumps({"type": "assistant", "message": {"content": list(content)}}),
+        "not json",
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def handback(report: str) -> dict[str, Any]:
+    return {"type": "tool_use", "name": "SubagentHandback", "input": {"message": report}}
+
+
+def test_a_handed_back_report_is_checked_but_only_warned_about(tmp_path):
+    transcript = estimator_transcript(tmp_path, handback(estimate_report(total=3)))
+    event = estimator_stop(tmp_path, "Done.", agent_transcript_path=str(transcript))
+
+    verdict = check_estimate(tmp_path, event)
+
+    assert verdict is not None
+    assert "decision" not in verdict
+    assert "handed back already" in verdict["systemMessage"]
+    record = json.loads((tmp_path / "home" / "estimate-check" / "s1-a1.json").read_text())
+    assert record["handed_back"] is True
+
+
+def test_a_valid_handed_back_report_passes(tmp_path):
+    transcript = estimator_transcript(tmp_path, handback(estimate_report()))
+    event = estimator_stop(tmp_path, "", agent_transcript_path=str(transcript))
+    assert check_estimate(tmp_path, event) is None
+
+
+def test_without_the_last_message_the_transcript_is_read(tmp_path):
+    text = {"type": "text", "text": estimate_report(total=3)}
+    transcript = estimator_transcript(tmp_path, text)
+    event = estimator_stop(tmp_path, None, agent_transcript_path=str(transcript))
+
+    verdict = check_estimate(tmp_path, event)
+
+    assert verdict is not None
+    assert verdict["decision"] == "block"
+
+
+@pytest.mark.parametrize("payload", ["not json", "[1, 2]"])
+def test_bad_input_never_blocks_the_estimator(tmp_path, payload):
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(HOOKS / "estimate_check.py")],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HARNESS_HOME": str(tmp_path)},
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""

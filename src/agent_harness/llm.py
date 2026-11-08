@@ -6,8 +6,8 @@ import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -17,6 +17,8 @@ from ticket_precedent.search import Searcher
 
 from .baselines import Estimate
 from .dataset import Target
+from .estimate_check import KINDS, MODES, UNCITED, is_citation, validate_and_total
+from .memory import Memory, memory_section
 
 AGENT_FILE = Path(__file__).resolve().parents[2] / "agents" / "estimator.md"
 DESCRIPTION_CHARS = 4000
@@ -39,6 +41,45 @@ SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+ESTIMATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "ticket": {"type": "string"},
+        "mode": {"type": "string", "enum": list(MODES)},
+        "reference_median": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+        "parts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": list(KINDS)},
+                    "hours": {"type": "number"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["name", "kind", "hours", "evidence"],
+                "additionalProperties": False,
+            },
+        },
+        "adjustments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "number"},
+                    "reason": {"type": "string"},
+                    "citation": {"type": "string"},
+                },
+                "required": ["hours", "reason", "citation"],
+                "additionalProperties": False,
+            },
+        },
+        "total": {"type": "number"},
+    },
+    "required": ["ticket", "mode", "reference_median", "parts", "adjustments", "total"],
+    "additionalProperties": False,
+}
+
 OFFLINE = """
 ## Offline evaluation
 
@@ -48,16 +89,34 @@ time. Answer with the JSON object only: median_hours, p25_hours, p75_hours, cite
 of the tickets you relied on) and reasoning (at most three sentences).
 """
 
+OFFLINE_STRUCTURED = """
+## Offline evaluation
+
+This run is a backtest. Tools are unavailable: the message holds everything you may use, and
+the reference class in it was already retrieved with the cut-off of the ticket's creation
+time. The ticket comes without an implementation plan. Answer with the body of the
+harness-estimate block only (see Answer): one JSON object, without the report around it.
+"""
+
+STRUCTURED = "-structured"
+WITH_MEMORY = "+memory"
+REJECTED = "rejected: "
+REJECTED_UNCITED = "rejected, uncited adjustment: "
+
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message: str, cost_usd: float = 0.0) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
 
 
 class Backend(Protocol):
     @property
     def name(self) -> str: ...
 
-    def complete(self, system: str, user: str) -> tuple[dict[str, Any], float]: ...
+    def complete(
+        self, system: str, user: str, schema: Mapping[str, Any] = SCHEMA
+    ) -> tuple[dict[str, Any], float]: ...
 
 
 def agent_prompt(path: Path = AGENT_FILE) -> str:
@@ -129,6 +188,21 @@ def parse_estimate(payload: dict[str, Any], cost: float, note: str = "") -> Esti
     return Estimate(median=median, p25=low, p75=high, cited=cited, cost_usd=cost, note=note)
 
 
+def parse_structured(payload: dict[str, Any], cost: float, note: str = "") -> Estimate:
+    """The estimate code computes from a harness-estimate block; an invalid block fails."""
+    total, errors = validate_and_total(payload)
+    if errors or total is None:
+        prefix = REJECTED_UNCITED if any(UNCITED in error for error in errors) else REJECTED
+        raise LLMError(prefix + " ".join(errors), cost_usd=cost)
+    return Estimate(median=total, cited=citations(payload), cost_usd=cost, note=note)
+
+
+def citations(block: Mapping[str, Any]) -> tuple[str, ...]:
+    items = [item for part in block.get("parts") or [] for item in part.get("evidence") or []]
+    items += [adjustment.get("citation") for adjustment in block.get("adjustments") or []]
+    return tuple(dict.fromkeys(item.strip() for item in items if is_citation(item)))
+
+
 @dataclass
 class LLMEstimator:
     """The estimator agent's prompt with a reference class from `context` retrieval.
@@ -136,6 +210,8 @@ class LLMEstimator:
     `context` is "none" (the ticket alone), "keyword" (BM25 neighbours, like a plain tracker
     search) or "hybrid" (ticket-precedent's BM25 + embeddings, what the agent uses). With
     `since`, the reference class holds only tickets created after a process change.
+    `structured` asks for the harness-estimate block and lets code compute the number;
+    `memory` adds the lessons learned before the ticket was created to the prompt.
     """
 
     backend: Backend
@@ -144,23 +220,50 @@ class LLMEstimator:
     k: int = 10
     since: str | None = None
     process_note: str | None = None
-    system: str = field(default_factory=lambda: agent_prompt() + "\n" + OFFLINE)
+    structured: bool = False
+    memory: Memory | None = None
+    system: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.system:
+            offline = OFFLINE_STRUCTURED if self.structured else OFFLINE
+            self.system = agent_prompt() + "\n" + offline
 
     @property
     def name(self) -> str:
         recent = "-recent" if self.since else ""
-        return f"llm-{self.context}{recent}@{self.backend.name}"
+        structured = STRUCTURED if self.structured else ""
+        memory = WITH_MEMORY if self.memory is not None else ""
+        return f"llm-{self.context}{recent}{structured}{memory}@{self.backend.name}"
 
     def estimate(self, target: Target) -> Estimate | None:
         reference = None
+        median = None
         if self.context != "none":
             mode = "bm25" if self.context == "keyword" else "hybrid"
             row = self.searcher.store.tickets_by_id([target.ticket_id])[target.ticket_id]
             found = reference_for_ticket(self.searcher, row, self.k, self.since, mode=mode)
             reference = describe_reference(self.searcher, found)
+            median = found.summary()["median_hours"]
         message, redacted = ticket_message(target, reference, self.process_note)
-        payload, cost = self.backend.complete(self.system, message)
-        return parse_estimate(payload, cost, "redacted" if redacted else "")
+        note = "redacted" if redacted else ""
+        system = self.system
+        lessons = None
+        if self.memory is not None:
+            usable = self.memory.usable_on(target.created)
+            system += memory_section(usable)
+            lessons = len(usable)
+        schema, parse = (
+            (ESTIMATE_SCHEMA, parse_structured) if self.structured else (SCHEMA, parse_estimate)
+        )
+        payload, cost = self.backend.complete(system, message, schema)
+        return replace(
+            parse(payload, cost, note),
+            reference_median=median,
+            lessons=lessons,
+            lessons_dated=None if self.memory is None else self.memory.dated,
+            lessons_undated=None if self.memory is None else self.memory.undated,
+        )
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -179,7 +282,9 @@ class ClaudeCode:
     def name(self) -> str:
         return f"claude-{self.model}"
 
-    def complete(self, system: str, user: str) -> tuple[dict[str, Any], float]:
+    def complete(
+        self, system: str, user: str, schema: Mapping[str, Any] = SCHEMA
+    ) -> tuple[dict[str, Any], float]:
         command = [
             self.binary,
             "-p",
@@ -188,7 +293,7 @@ class ClaudeCode:
             "--output-format",
             "json",
             "--json-schema",
-            json.dumps(SCHEMA),
+            json.dumps(schema),
             "--system-prompt",
             system,
             "--tools",
@@ -215,9 +320,12 @@ class ClaudeCode:
         except json.JSONDecodeError as error:
             raise LLMError(f"claude -p failed: {result.stderr.strip()[:300]}") from error
         output = response.get("structured_output")
+        cost = float(response.get("total_cost_usd") or 0.0)
         if response.get("is_error") or not isinstance(output, dict):
-            raise LLMError(f"claude -p returned no estimate: {str(response.get('result'))[:300]}")
-        return output, float(response.get("total_cost_usd") or 0.0)
+            raise LLMError(
+                f"claude -p returned no estimate: {str(response.get('result'))[:300]}", cost
+            )
+        return output, cost
 
 
 @dataclass
@@ -231,7 +339,9 @@ class Ollama:
     def name(self) -> str:
         return f"ollama-{self.model}"
 
-    def complete(self, system: str, user: str) -> tuple[dict[str, Any], float]:
+    def complete(
+        self, system: str, user: str, schema: Mapping[str, Any] = SCHEMA
+    ) -> tuple[dict[str, Any], float]:
         response = self.client.post(
             f"{self.url}/api/chat",
             json={
@@ -240,7 +350,7 @@ class Ollama:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "format": SCHEMA,
+                "format": schema,
                 "stream": False,
                 "think": False,
                 "options": {"temperature": 0, "num_ctx": 16384},
