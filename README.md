@@ -54,6 +54,7 @@ its own marketplace.
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database, and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
+| `hooks/guard_runaway.py` | Stops a subagent that repeats the same call or keeps failing, and once tells one that has run long to report ([rules](#runaway-guard)). |
 | `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
@@ -313,6 +314,68 @@ Each denial appends one line to `guard-events.jsonl` under `$HARNESS_HOME` (defa
 (`deny`). It never holds the command, file content or paths, which may contain secrets. Writing
 it is best effort: a failure is logged to stderr and the decision stands. Other hooks append
 with `log_guard_event(environ, event, hook, rule, decision)` from `hooks/guard_shell.py`.
+
+## Runaway guard
+
+`hooks/guard_runaway.py` watches every tool call of a subagent. It stops one that repeats the
+same call or keeps failing, and once tells one that has run long to report. The main session,
+which the person supervises, is never touched: it counts only events with an `agent_id`, so a
+session started with `--agent` is left alone too.
+
+| Rule | When | What happens |
+|---|---|---|
+| `loop` | the same call arrives for the `loop_repeats`-th time with nothing changed in between | denied: change the approach, or stop and report to the lead what blocks you |
+| `failure_streak` | `failure_streak` calls failed in a row | the next call is denied once: stop and report to the lead what fails and what you tried |
+| `long_run` | `warn_minutes` after the agent's first call | once, next to a tool result: if what is left will take more than about 10 more minutes, stop and report what is done, what is left, the expected time and the options |
+
+- The same call is the tool name and its whole input; for Bash the `description` is left out
+  and runs of spaces collapse. The guard stores only a hash of it.
+- Reads and searches (Read, Grep, Glob, LS, NotebookRead, WebFetch, WebSearch, ToolSearch)
+  neither end nor reset a run, so reading other files between three identical test runs still
+  counts. Any other call ends the run of every other call; its own repeats still count.
+- Never counted, and they end every run: subagent and messaging calls (Agent, Task,
+  SendMessage, SubagentHandback), deliberate waits and polls (TaskOutput, BashOutput, Monitor,
+  ScheduleWakeup, a Bash command with `sleep` or `wait` as a word) and AskUserQuestion.
+- A failure is a failed call that was not interrupted; a successful call resets the streak. A
+  call denied by a hook or a permission is neither. A call that reports or asks
+  (SubagentHandback, SendMessage, AskUserQuestion) is never denied and resets the streak.
+
+The settings are the `runaway` object in `~/.claude/agent-harness/guard.json` (under
+`$HARNESS_HOME` when set), then in the `guard` key of the project's
+`.claude/agent-harness.json`; a later value of a key wins. 0 turns a rule off.
+
+| Key | Default |
+|---|---|
+| `loop_repeats` | `3`; 0 or a whole number from 2 |
+| `failure_streak` | `5`; a whole number |
+| `warn_minutes` | `10`; minutes, fractions allowed |
+
+```json
+{ "guard": { "runaway": { "loop_repeats": 3, "failure_streak": 5, "warn_minutes": 10 } } }
+```
+
+An invalid value is ignored and named in the next deny reason. Each agent's state lives in
+`~/.claude/agent-harness/runaway/<session>/<agent>.json`; when an agent starts, session
+folders untouched for two days are removed. An internal error lets the call through and logs
+to stderr.
+
+Each deny and each long-run note appends one line to `~/.claude/agent-harness/guard-events.jsonl`
+(under `$HARNESS_HOME` when set), never with the tool input:
+
+```json
+{"time": "2026-11-08T09:12:40+00:00", "hook": "guard_runaway", "session": "<session_id>", "agent_id": "<agent_id>", "agent_type": "agent-harness:implementer", "tool": "Bash", "rule": "loop", "decision": "deny"}
+```
+
+`rule` is `loop`, `failure_streak` or `long_run`; `decision` is `deny` or `context` (the note).
+A line that cannot be written is reported on stderr and changes nothing.
+
+It misses a loop over two or more calls (A, B, A, B: each call ends the other's run), a
+repeated call whose input changes each time (a counter, a timestamp) and a loop of calls it
+never counts (waits, subagents). Parallel calls of one batch count in the order their hooks
+run.
+
+The rules are adapted from the [runaway-guard](https://github.com/RyanAlberts/best-of-Agent-Harnesses/tree/main/skills/runaway-guard)
+skill in best-of-Agent-Harnesses (MIT license); the code is this repository's own.
 
 ## Memory hygiene
 
