@@ -51,7 +51,10 @@ person says yes, show the exact text first, and use the tracker's own markup.
 ## 4. Implement
 
 Run the `implementer` subagent with the approved approach, the acceptance criteria and any
-adjustments. The plugin's hook runs the project's tests after each edit while it works.
+adjustments. The plugin's hook runs the project's tests after each edit while it works, and
+the repository's quality gate (`.claude/agent-harness.json`) when it finishes; read
+`gates.json` before you trust that the checks passed. The plugin keeps every agent's report
+and structured block in `$HARNESS_HOME/tickets/<KEY>/` for the retro.
 
 ## 5. Review
 

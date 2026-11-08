@@ -12,5 +12,16 @@
         "reason": "Terraform changes real infrastructure"
       }
     ]
+  },
+  "gate": {
+    "commands": [
+      { "cmd": "vendor/bin/phpstan analyse --no-progress {files}", "match": "\\.php$" },
+      { "cmd": "uv run ruff check {files}", "match": "\\.py$" },
+      { "cmd": "uv run ruff format --check {files}", "match": "\\.py$" },
+      { "cmd": "actionlint {files}", "match": "^\\.github/workflows/.+\\.ya?ml$" },
+      { "cmd": "uv run mypy", "match": "\\.py$" }
+    ],
+    "timeout": 300,
+    "max_blocks": 2
   }
 }

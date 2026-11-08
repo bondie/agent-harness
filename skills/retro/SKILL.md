@@ -12,6 +12,12 @@ its time is logged; a retro on half-logged time teaches the estimator the wrong 
 
 ## 1. Collect the facts
 
+Start from the files the plugin kept for the ticket in `$HARNESS_HOME/tickets/<KEY>/`
+(default `~/.claude/agent-harness/tickets/<KEY>/`): each agent's report (`<agent>.<NN>.md`,
+listed in `index.jsonl`), its structured block (`analysis.json`, `estimate.json`,
+`review.json`, `implementation.json`) and the quality gate result (`gates.json`). Reconstruct
+from the conversation only what is missing there.
+
 - **Estimate:** what the estimator said (the hours, per part when it estimated
   bottom-up), from this conversation or from the comment where it was posted.
 - **Actual time:** the person's own logged hours on the ticket from the tracker's worklogs,
