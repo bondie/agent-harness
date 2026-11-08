@@ -2,8 +2,9 @@
 """SubagentStop hook: append one line per finished subagent run to a JSONL log.
 
 The log is what the `stats` skill and the retro read to see whether the agents get faster
-and cheaper. Each line has the agent type, the duration, the API requests, the tool calls,
-the token usage and the first ticket key in the task. A background agent that is resumed
+and cheaper. Each line has the agent type, the plugin version, the model, the duration, the
+API requests, the tool calls, the token usage and the first ticket key in the task. A
+background agent that is resumed
 stops more than once; its later lines carry the cumulative totals, so readers keep the
 last line per agent id. Standard library only, and it never blocks the session.
 """
@@ -102,6 +103,16 @@ def project_name(cwd: str) -> str | None:
     return path.name or None
 
 
+def plugin_version() -> str | None:
+    manifest_path = Path(__file__).resolve().parents[1] / ".claude-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    return version if isinstance(version, str) else None
+
+
 def record(event: dict[str, Any]) -> dict[str, Any] | None:
     transcript = event.get("agent_transcript_path")
     if not transcript or not Path(transcript).is_file():
@@ -114,6 +125,7 @@ def record(event: dict[str, Any]) -> dict[str, Any] | None:
         "agent_id": event.get("agent_id"),
         "agent_type": event.get("agent_type") or meta.get("agentType"),
         "description": meta.get("description"),
+        "plugin_version": plugin_version(),
         **summarise(Path(transcript)),
     }
 

@@ -44,12 +44,12 @@ its own marketplace.
 | `agent-harness:implementer` | Implements the approved approach test-first, inside its scope, and reports where the time went. Never commits or writes to the tracker. Remembers commands, traps and conventions per codebase. |
 | `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria and the codebase's review skill when there is one, runs the checks, reports `path:line` findings and a verdict. Runs on the session's model at `xhigh` effort. Does not edit; remembers rejected findings and recurring defects. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
-| `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. |
+| `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. `--by version\|model` groups each agent's runs by plugin version or model, `--split DATE` compares them before and after a moment such as a plugin update. |
 | `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened; each agent proposes lessons for its memory and writes the ones the person approves. |
 | `/agent-harness:upgrade-impact` | A [dynamic workflow](https://code.claude.com/docs/en/workflows): before a dependency upgrade, one agent per component group reads the changelog in the version range and finds the changes your code uses; skeptics try to refute each risk. Returns the risks that survive, with `repo:path:line` and a test for each. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
-| `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
+| `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens, model, plugin version and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
 | `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/` (under `$HARNESS_HOME` when set). |
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |

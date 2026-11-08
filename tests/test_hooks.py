@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -786,6 +787,40 @@ def test_a_finished_subagent_run_is_logged(tmp_path):
     assert run["tokens"]["output_tokens"] == 70
     assert run["tokens"]["cache_read_input_tokens"] == 200
     assert run["model"] == "claude-sonnet"
+    manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+    assert run["plugin_version"] == manifest["version"]
+
+
+@pytest.mark.parametrize(
+    "manifest", [None, "<dir>", "", "not json", "[1]", '{"name": "x"}', '{"version": 6}']
+)
+def test_an_unreadable_plugin_version_is_logged_as_none(tmp_path, manifest):
+    plugin = tmp_path / "plugin"
+    (plugin / "hooks").mkdir(parents=True)
+    script = plugin / "hooks" / "log_agent_runs.py"
+    shutil.copy(HOOKS / "log_agent_runs.py", script)
+    target = plugin / ".claude-plugin" / "plugin.json"
+    target.parent.mkdir()
+    if manifest == "<dir>":
+        target.mkdir()
+    if manifest not in (None, "<dir>"):
+        target.write_text(manifest)
+    log = tmp_path / "runs.jsonl"
+    event = {"agent_id": "a1", "agent_transcript_path": str(transcript(tmp_path))}
+
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(script)],
+        input=json.dumps(event),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HARNESS_RUNS_LOG": str(log)},
+        check=False,
+    )
+
+    assert (result.returncode, result.stderr) == (0, "")
+    [run] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert run["plugin_version"] is None
+    assert run["requests"] == 2
 
 
 @pytest.mark.parametrize("git", ["dir", "file"])
