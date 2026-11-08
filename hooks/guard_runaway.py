@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from guard_shell import config_sources, harness_home
+from guard_shell import config_sources, harness_home, log_guard_event
 from save_artifacts import locked
 
 DEFAULTS: dict[str, Any] = {"loop_repeats": 3, "failure_streak": 5, "warn_minutes": 10}
@@ -248,26 +248,6 @@ def after_call(
     )
 
 
-def log_guard_event(
-    environ: Mapping[str, str], event: dict[str, Any], rule: str, outcome: str, now: float
-) -> None:
-    try:
-        line = {
-            "time": datetime.fromtimestamp(now, UTC).isoformat(timespec="seconds"),
-            "hook": "guard_runaway",
-            "session": event.get("session_id"),
-            "agent_id": event.get("agent_id"),
-            "agent_type": event.get("agent_type"),
-            "tool": event.get("tool_name"),
-            "rule": rule,
-            "decision": outcome,
-        }
-        with (harness_home(environ) / "guard-events.jsonl").open("a", encoding="utf-8") as log:
-            log.write(json.dumps(line, default=str) + "\n")
-    except Exception as error:
-        print(f"guard_runaway.py could not log a guard event: {error!r}", file=sys.stderr)
-
-
 def deny(reason: str, warnings: list[str]) -> dict[str, Any]:
     if warnings:
         reason += " Runaway guard config warnings: " + "; ".join(warnings) + "."
@@ -306,7 +286,10 @@ def decision(
     if found is None:
         return None
     rule, text = found
-    log_guard_event(environ, event, rule, "deny" if before else "context", moment)
+    outcome = "deny" if before else "context"
+    log_guard_event(
+        environ, event, "guard_runaway", rule, outcome, now=datetime.fromtimestamp(moment, UTC)
+    )
     if before:
         return deny(text, settings.warnings)
     return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": text}}
