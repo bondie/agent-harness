@@ -1,0 +1,993 @@
+#!/usr/bin/env python3
+"""PreToolUse hook: deny shell commands that destroy work, leak secrets or touch production.
+
+It parses the Bash command, including chains, pipes, subshells, `bash -c`, `eval`, `xargs`,
+`sudo`/`env` prefixes and heredocs fed to a shell, and denies with the rule and a safe
+alternative: force-pushes, `git reset --hard`/`clean -f`/`checkout .`/`restore .` outside the
+allowed temp dirs, `rm -r` and `find -delete`/`-exec rm` outside the allowed dirs, raw reads
+of secret files, connections to production database hosts and DROP/TRUNCATE in a database
+client command. Settings: built-in defaults, then `$HARNESS_HOME/guard.json` (default
+`~/.claude/agent-harness/guard.json`), then the `guard` key of the project's
+`.claude/agent-harness.json`. It catches mistakes; it is not a sandbox against deliberate
+evasion. Standard library only; on an internal error it allows the command and logs to stderr.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+import re
+import sys
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePath
+from typing import Any, TextIO
+from urllib.parse import urlsplit
+
+DEFAULTS: dict[str, Any] = {
+    "scope": "subagents",
+    "allow_force_with_lease": "main",
+    "secret_globs": [
+        ".env",
+        ".env.*",
+        "*.pem",
+        "*.key",
+        "id_rsa*",
+        "id_ed25519*",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        "*credentials*",
+        "auth.json",
+    ],
+    "secret_allow_globs": [".env.example", ".env.dist", "*.pub"],
+    "allowed_rm_dirs": [],
+    "prod_db_hosts": [],
+    "safe_filters": [],
+    "extra_deny": [],
+}
+LIST_KEYS = {
+    "secret_globs",
+    "secret_allow_globs",
+    "allowed_rm_dirs",
+    "prod_db_hosts",
+    "safe_filters",
+    "extra_deny",
+}
+REGEX_KEYS = {"prod_db_hosts", "safe_filters"}
+SCRATCHPADS = ["/tmp/claude-*", "/private/tmp/claude-*"]  # noqa: S108
+MAX_DEPTH = 8
+
+REDIRECTS = {"<<<", "<<-", "<<", "<>", "<&", ">>", ">&", ">|", "&>>", "&>", "<", ">"}
+OPERATORS = sorted(
+    [*REDIRECTS, "&&", "||", ";;", "|&", ";", "&", "|", "(", ")", "\n"], key=len, reverse=True
+)
+PIPES = {"|", "|&"}
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+VARIABLE = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+MAGIC = re.compile(r"[*?[]")
+RESERVED = {"{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until"}
+RESERVED |= {"case", "esac", "for", "select", "function", "in"}
+WRAPPERS: dict[str, set[str]] = {
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"},
+    "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
+    "command": set(),
+    "builtin": set(),
+    "exec": {"-a"},
+    "nohup": set(),
+    "time": set(),
+    "nice": {"-n"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "ionice": {"-c", "-n", "-p"},
+    "xargs": {"-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a", "--max-args", "--delimiter"},
+}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+GREPS = {"grep", "egrep", "fgrep"}
+READERS = GREPS | {"cat", "head", "tail", "less", "more", "sed", "awk", "gawk", "strings"}
+READERS |= {"xxd", "base64"}
+GREP_QUIET = {"-c", "-l", "-L", "-q", "--count", "--files-with-matches"}
+GREP_QUIET |= {"--files-without-match", "--quiet", "--silent"}
+GREP_LONG_VALUES = {"--regexp", "--file", "--max-count", "--after-context", "--before-context"}
+GREP_LONG_VALUES |= {"--context", "--include", "--exclude", "--exclude-dir", "--label"}
+DB_CLIENTS = {"mysql", "mariadb", "psql", "mongosh", "mongo", "redis-cli"}
+DB_HOST_ENV = {"PGHOST", "MYSQL_HOST"}
+DESTRUCTIVE_SQL = re.compile(r"\b(?:DROP\s+(?:DATABASE|TABLE|SCHEMA)\b|TRUNCATE\b(?!\s*\())", re.I)
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+WHOLE_TREE = {".", "./", "*", ":/", ":/.", ":/*", ":(top)", ":(top)."}
+
+
+@dataclass
+class Config:
+    scope: str
+    allow_force_with_lease: bool | str
+    secret_globs: list[str]
+    secret_allow_globs: list[str]
+    rm_dirs: list[str]
+    rm_trees: list[str]
+    prod_db_hosts: list[re.Pattern[str]]
+    safe_filters: list[re.Pattern[str]]
+    extra_deny: list[tuple[re.Pattern[str], str]]
+    warnings: list[str]
+
+
+def expand(text: str, environ: Mapping[str, str]) -> str:
+    text = VARIABLE.sub(lambda m: environ.get(m.group(1) or m.group(2), m.group(0)), text)
+    home = environ.get("HOME")
+    if home and (text == "~" or text.startswith("~/")):
+        return home + text[1:]
+    return text
+
+
+def read_json(path: Path, warnings: list[str]) -> Any:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        warnings.append(f"{path} is unreadable ({error.strerror})")
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        warnings.append(f"{path} is not valid JSON")
+        return None
+
+
+def config_sources(
+    environ: Mapping[str, str], project: Path | None, warnings: list[str]
+) -> list[tuple[str, Any]]:
+    home = environ.get("HARNESS_HOME") or str(Path.home() / ".claude" / "agent-harness")
+    sources: list[tuple[str, Any]] = []
+    user = read_json(Path(home) / "guard.json", warnings)
+    if user is not None:
+        sources.append((str(Path(home) / "guard.json"), user))
+    if project is None:
+        return sources
+    path = project / ".claude" / "agent-harness.json"
+    data = read_json(path, warnings)
+    if data is None:
+        return sources
+    if not isinstance(data, dict):
+        warnings.append(f"{path} is not a JSON object")
+        return sources
+    if "guard" in data:
+        sources.append((f"{path} (guard)", data["guard"]))
+    return sources
+
+
+def compiles(pattern: Any) -> bool:
+    if not isinstance(pattern, str):
+        return False
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
+
+
+def problem(key: str, value: Any) -> str | None:
+    if key == "scope":
+        return None if value in ("subagents", "all") else 'must be "subagents" or "all"'
+    if key == "allow_force_with_lease":
+        return (
+            None if isinstance(value, bool) or value == "main" else 'must be true, false or "main"'
+        )
+    if not isinstance(value, list):
+        return "must be a list"
+    if key == "extra_deny":
+        valid = all(
+            isinstance(item, dict)
+            and compiles(item.get("pattern"))
+            and isinstance(item.get("reason"), str)
+            for item in value
+        )
+        return None if valid else 'needs {"pattern": <regex>, "reason": <text>} items'
+    if key in REGEX_KEYS:
+        return None if all(compiles(item) for item in value) else "needs valid regular expressions"
+    return None if all(isinstance(item, str) for item in value) else "needs strings"
+
+
+def dir_pattern(entry: str, environ: Mapping[str, str], project: Path | None) -> str | None:
+    text = expand(entry, environ)
+    if text.startswith("~"):
+        return None
+    path = PurePath(text)
+    if not path.is_absolute():
+        if project is None:
+            return None
+        path = project / path
+    parts = path.parts
+    fixed = next((i for i, part in enumerate(parts) if MAGIC.search(part)), len(parts))
+    head = os.path.realpath(PurePath(*parts[:fixed]))
+    return str(PurePath(glob.escape(head), *parts[fixed:]))
+
+
+def temp_dirs(environ: Mapping[str, str]) -> list[str]:
+    dirs = [environ.get(name, "") for name in ("TMPDIR", "TEMP", "TMP")]
+    return [d for d in dirs if d] or ["/tmp"]  # noqa: S108
+
+
+def load_config(environ: Mapping[str, str], project: Path | None) -> Config:
+    warnings: list[str] = []
+    settings: dict[str, Any] = {
+        key: list(value) if isinstance(value, list) else value for key, value in DEFAULTS.items()
+    }
+    for name, data in config_sources(environ, project, warnings):
+        if not isinstance(data, dict):
+            warnings.append(f"{name} is not a JSON object")
+            continue
+        for key, value in data.items():
+            if key not in DEFAULTS:
+                warnings.append(f"{name}: unknown key {key}")
+                continue
+            issue = problem(key, value)
+            if issue:
+                warnings.append(f"{name}: {key} {issue}, so it is ignored")
+                continue
+            settings[key] = settings[key] + value if key in LIST_KEYS else value
+    rm_dirs = [dir_pattern(entry, environ, None) for entry in SCRATCHPADS + temp_dirs(environ)]
+    rm_trees = [dir_pattern(entry, environ, project) for entry in settings["allowed_rm_dirs"]]
+    return Config(
+        scope=settings["scope"],
+        allow_force_with_lease=settings["allow_force_with_lease"],
+        secret_globs=settings["secret_globs"],
+        secret_allow_globs=settings["secret_allow_globs"],
+        rm_dirs=[pattern for pattern in rm_dirs if pattern],
+        rm_trees=[pattern for pattern in rm_trees if pattern],
+        prod_db_hosts=[re.compile(p, re.I) for p in settings["prod_db_hosts"]],
+        safe_filters=[re.compile(p) for p in settings["safe_filters"]],
+        extra_deny=[(re.compile(i["pattern"]), i["reason"]) for i in settings["extra_deny"]],
+        warnings=warnings,
+    )
+
+
+@dataclass
+class Token:
+    text: str
+    op: bool = False
+    body: str = ""
+
+
+def balanced(script: str, start: int) -> tuple[str, int]:
+    depth, i, quote = 1, start, ""
+    while i < len(script):
+        char = script[i]
+        if quote and char == "\\" and quote == '"':
+            i += 2
+            continue
+        if quote:
+            quote = "" if char == quote else quote
+            i += 1
+            continue
+        if char == "\\":
+            i += 2
+            continue
+        if char in "'\"":
+            quote = char
+        depth += (char == "(") - (char == ")")
+        if depth == 0:
+            return script[start:i], i + 1
+        i += 1
+    return script[start:], len(script)
+
+
+def closing(script: str, start: int, quote: str) -> int:
+    i = start
+    while i < len(script) and script[i] != quote:
+        i += 2 if script[i] == "\\" else 1
+    return min(i, len(script))
+
+
+def decode_ansi(raw: str) -> str:
+    try:
+        return raw.encode("latin-1", "backslashreplace").decode("unicode_escape")
+    except UnicodeError:
+        return raw
+
+
+class Lexer:
+    def __init__(self, script: str) -> None:
+        self.script = script
+        self.i = 0
+        self.tokens: list[Token] = []
+        self.nested: list[str] = []
+        self.word: list[str] = []
+        self.in_word = False
+        self.quoted = False
+        self.heredocs: list[int] = []
+
+    def run(self) -> list[Token]:
+        script = self.script
+        while self.i < len(script):
+            char = script[self.i]
+            if char == "\\":
+                self.escape()
+                continue
+            if char == "'":
+                end = script.find("'", self.i + 1)
+                end = len(script) if end < 0 else end
+                self.add(script[self.i + 1 : end], quoted=True)
+                self.i = end + 1
+                continue
+            if char == '"':
+                self.double()
+                continue
+            if script.startswith("$'", self.i):
+                end = closing(script, self.i + 2, "'")
+                self.add(decode_ansi(script[self.i + 2 : end]), quoted=True)
+                self.i = end + 1
+                continue
+            if script.startswith("$(", self.i):
+                inner, end = balanced(script, self.i + 2)
+                self.nested.append(inner)
+                self.add(script[self.i : end])
+                self.i = end
+                continue
+            if char == "`":
+                end = closing(script, self.i + 1, "`")
+                self.nested.append(script[self.i + 1 : end])
+                self.add(script[self.i : end + 1])
+                self.i = end + 1
+                continue
+            if char in " \t\r":
+                self.flush()
+                self.i += 1
+                continue
+            if char == "#" and not self.in_word:
+                end = script.find("\n", self.i)
+                self.i = len(script) if end < 0 else end
+                continue
+            operator = next((op for op in OPERATORS if script.startswith(op, self.i)), None)
+            if operator:
+                self.operator(operator)
+                continue
+            self.add(char)
+            self.i += 1
+        self.flush()
+        self.read_heredocs()
+        return self.tokens
+
+    def add(self, text: str, quoted: bool = False) -> None:
+        self.word.append(text)
+        self.in_word = True
+        self.quoted = self.quoted or quoted
+
+    def flush(self) -> None:
+        if self.in_word:
+            self.tokens.append(Token("".join(self.word)))
+        self.word, self.in_word, self.quoted = [], False, False
+
+    def escape(self) -> None:
+        following = self.script[self.i + 1 : self.i + 2]
+        self.i += 2
+        if following != "\n":
+            self.add(following, quoted=True)
+
+    def double(self) -> None:
+        script, i, out = self.script, self.i + 1, []
+        while i < len(script) and script[i] != '"':
+            if script[i] == "\\" and script[i + 1 : i + 2] in ('"', "\\", "$", "`", "\n"):
+                out.append(script[i + 1].replace("\n", ""))
+                i += 2
+                continue
+            if script.startswith("$(", i):
+                inner, end = balanced(script, i + 2)
+                self.nested.append(inner)
+                out.append(script[i:end])
+                i = end
+                continue
+            if script[i] == "`":
+                end = closing(script, i + 1, "`")
+                self.nested.append(script[i + 1 : end])
+                out.append(script[i : end + 1])
+                i = end + 1
+                continue
+            out.append(script[i])
+            i += 1
+        self.add("".join(out), quoted=True)
+        self.i = i + 1
+
+    def operator(self, operator: str) -> None:
+        if operator[0] in "<>" and not self.quoted and "".join(self.word).isdigit():
+            self.word, self.in_word = [], False
+        self.flush()
+        self.i += len(operator)
+        if operator in ("<<", "<<-"):
+            self.heredocs.append(len(self.tokens))
+        self.tokens.append(Token(operator, op=True))
+        if operator == "\n":
+            self.read_heredocs()
+
+    def read_heredocs(self) -> None:
+        pending, self.heredocs = self.heredocs, []
+        for index in pending:
+            delimiter = self.tokens[index + 1] if index + 1 < len(self.tokens) else None
+            if delimiter is None or delimiter.op:
+                continue
+            lines = []
+            while self.i < len(self.script):
+                end = self.script.find("\n", self.i)
+                end = len(self.script) if end < 0 else end
+                line = self.script[self.i : end]
+                self.i = end + 1
+                if line.lstrip("\t") == delimiter.text:
+                    break
+                lines.append(line)
+            self.tokens[index].body = "\n".join(lines)
+
+
+@dataclass
+class Command:
+    words: list[str] = field(default_factory=list)
+    redirects: list[tuple[str, str]] = field(default_factory=list)
+    stdin: list[str] = field(default_factory=list)
+    after: str = ""
+
+
+def commands(tokens: list[Token]) -> list[Command | str]:
+    items: list[Command | str] = []
+    current = Command()
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if not token.op:
+            current.words.append(token.text)
+            continue
+        if token.text in REDIRECTS:
+            has_target = i < len(tokens) and not tokens[i].op
+            target = tokens[i].text if has_target else ""
+            i += 1 if has_target else 0
+            current.redirects.append((token.text, target))
+            if token.text in ("<<", "<<-"):
+                current.stdin.append(token.body)
+            if token.text == "<<<":
+                current.stdin.append(target)
+            continue
+        current.after = token.text
+        if current.words or current.redirects:
+            items.append(current)
+        if token.text in ("(", ")"):
+            items.append(token.text)
+        current = Command()
+    if current.words or current.redirects:
+        items.append(current)
+    return items
+
+
+@dataclass
+class Call:
+    program: str
+    args: list[str]
+    env: dict[str, str]
+    via_xargs: bool
+
+
+def skip_options(words: list[str], i: int, with_value: set[str]) -> int:
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] == "--":
+            return i + 1
+        i += 2 if words[i] in with_value else 1
+    return i
+
+
+def unwrap(words: list[str]) -> Call | None:
+    env: dict[str, str] = {}
+    via_xargs = False
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if ASSIGNMENT.match(word):
+            name, _, value = word.partition("=")
+            env[name] = value
+            i += 1
+            continue
+        if word in RESERVED:
+            i += 1
+            continue
+        program = PurePath(word).name if word else word
+        if program not in WRAPPERS:
+            return Call(program, words[i + 1 :], env, via_xargs)
+        i = skip_options(words, i + 1, WRAPPERS[program])
+        i += 1 if program == "timeout" else 0
+        via_xargs = via_xargs or program == "xargs"
+    return None
+
+
+def parse(args: list[str], short_values: str, long_values: set[str]) -> tuple[set[str], list[str]]:
+    flags: set[str] = set()
+    operands: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == "--":
+            operands += args[i:]
+            break
+        if arg.startswith("--"):
+            name = arg.split("=", 1)[0]
+            flags.add(name)
+            i += 1 if name in long_values and "=" not in arg else 0
+            continue
+        if not arg.startswith("-") or arg == "-":
+            operands.append(arg)
+            continue
+        for position, letter in enumerate(arg[1:], start=2):
+            flags.add("-" + letter)
+            if letter in short_values:
+                i += 1 if position == len(arg) else 0
+                break
+    return flags, operands
+
+
+def short_flag(arg: str, letter: str, values: str = "") -> bool:
+    if not arg.startswith("-") or arg.startswith("--"):
+        return False
+    for char in arg[1:]:
+        if char == letter:
+            return True
+        if char in values:
+            return False
+    return False
+
+
+def reader_files(program: str, args: list[str]) -> list[str] | None:
+    if program in GREPS:
+        flags, operands = parse(args, "efmABCdD", GREP_LONG_VALUES)
+        if flags & GREP_QUIET:
+            return None
+        return operands if flags & {"-e", "-f", "--regexp", "--file"} else operands[1:]
+    if program == "sed":
+        flags, operands = parse(args, "efl", {"--expression", "--file", "--line-length"})
+        if flags & {"-i", "--in-place"}:
+            return None
+        return operands if flags & {"-e", "-f", "--expression", "--file"} else operands[1:]
+    if program in ("awk", "gawk"):
+        flags, operands = parse(args, "fvF", {"--file", "--assign", "--field-separator"})
+        return operands if flags & {"-f", "--file"} else operands[1:]
+    return [arg for arg in args if not arg.startswith("-")]
+
+
+def find_roots(args: list[str]) -> list[str]:
+    i = 0
+    while i < len(args) and (args[i] in ("-H", "-L", "-P", "-D") or args[i].startswith("-O")):
+        i += 2 if args[i] == "-D" else 1
+    roots = []
+    for arg in args[i:]:
+        if arg.startswith("-") or arg in ("(", "!"):
+            break
+        roots.append(arg)
+    return roots or ["."]
+
+
+def find_deletes(args: list[str]) -> bool:
+    for i, arg in enumerate(args):
+        if arg == "-delete":
+            return True
+        runs = arg in ("-exec", "-execdir", "-ok", "-okdir") and i + 1 < len(args)
+        if runs and PurePath(args[i + 1]).name == "rm":
+            return True
+    return False
+
+
+def shell_script(args: list[str]) -> tuple[bool, str | None]:
+    has_c = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            i += 2
+            continue
+        if arg.startswith(("-", "+")):
+            has_c = has_c or (not arg.startswith("--") and "c" in arg)
+            i += 1
+            continue
+        return has_c, arg
+    return has_c, None
+
+
+def db_hosts(call: Call) -> list[str]:
+    hosts = [value for name, value in call.env.items() if name in DB_HOST_ENV]
+    args = call.args
+    for i, arg in enumerate(args):
+        if arg in ("-h", "--host") and i + 1 < len(args):
+            hosts.append(args[i + 1])
+        if arg.startswith("--host="):
+            hosts.append(arg[len("--host=") :])
+        if arg.startswith("-h") and not arg.startswith("--") and len(arg) > 2:
+            hosts.append(arg[2:])
+        if "host=" in arg and not arg.startswith("--"):
+            hosts.append(arg)
+        if "://" in arg:
+            hosts.append(uri_host(arg))
+    return hosts
+
+
+def uri_host(uri: str) -> str:
+    try:
+        return urlsplit(uri).hostname or uri
+    except ValueError:
+        return uri
+
+
+@dataclass
+class Denial:
+    rule: str
+    what: str
+    proceed: str
+
+
+class Checker:
+    def __init__(
+        self, config: Config, environ: Mapping[str, str], cwd: str | None, subagent: bool
+    ) -> None:
+        self.config = config
+        self.environ = environ
+        start = os.path.realpath(cwd) if cwd else None
+        self.cwds: list[str | None] = [start]
+        self.history: list[str | None] = [start]
+        self.stack: list[tuple[list[str | None], list[str | None]]] = []
+        self.subagent = subagent
+
+    def script(self, text: str, depth: int = 0) -> Denial | None:
+        if depth > MAX_DEPTH:
+            return Denial(
+                "nesting",
+                f"the command nests shells more than {MAX_DEPTH} levels deep, too deep to check",
+                "run the inner command directly.",
+            )
+        lexer = Lexer(text)
+        items = commands(lexer.run())
+        for index in range(len(items)):
+            denial = self.item(items, index, depth)
+            if denial:
+                return denial
+        for inner in lexer.nested:
+            denial = self.subshell(inner, depth + 1)
+            if denial:
+                return denial
+        return None
+
+    def subshell(self, text: str, depth: int) -> Denial | None:
+        saved = (list(self.cwds), list(self.history))
+        denial = self.script(text, depth)
+        self.cwds, self.history = saved
+        return denial
+
+    def item(self, items: list[Command | str], index: int, depth: int) -> Denial | None:
+        item = items[index]
+        if item == "(":
+            self.stack.append((list(self.cwds), list(self.history)))
+            return None
+        if isinstance(item, str):
+            if self.stack:
+                self.cwds, self.history = self.stack.pop()
+            return None
+        call = unwrap(item.words)
+        denial = self.call(call, item, items, index, depth) if call else None
+        if item.after == "||":
+            self.cwds = list(dict.fromkeys(self.history))
+        return denial
+
+    def call(
+        self, call: Call, command: Command, items: list[Command | str], index: int, depth: int
+    ) -> Denial | None:
+        name = call.program
+        if name in ("cd", "pushd", "popd"):
+            self.change_dir(call, command.after)
+            return None
+        if name in SHELLS:
+            return self.shell(call, command, depth)
+        if name == "eval":
+            return self.subshell(" ".join(call.args), depth + 1)
+        if name == "rm":
+            return self.rm(call, items, index)
+        if name == "find" and find_deletes(call.args):
+            return self.find(call)
+        if name == "git":
+            return self.git(call)
+        if name in READERS:
+            return self.secret_read(call, command, items, index)
+        if name in DB_CLIENTS:
+            return self.database(call, command)
+        return None
+
+    def path(self, text: str, cwd: str | None) -> str | None:
+        text = expand(text, self.environ)
+        if not text or "$" in text or "`" in text or text.startswith("~"):
+            return None
+        candidate = PurePath(text)
+        if not candidate.is_absolute() and cwd is None:
+            return None
+        if not candidate.is_absolute():
+            candidate = PurePath(cwd or "") / candidate
+        return os.path.realpath(candidate)
+
+    def inside(self, path: str | None) -> bool:
+        if path is None:
+            return False
+        parents = [str(parent) for parent in PurePath(path).parents]
+        if any(fnmatchcase(p, pattern) for p in parents for pattern in self.config.rm_dirs):
+            return True
+        return any(
+            fnmatchcase(p, pattern) for p in [path, *parents] for pattern in self.config.rm_trees
+        )
+
+    def allowed(self, target: str, cwds: list[str | None] | None = None) -> bool:
+        return all(self.inside(self.path(target, cwd)) for cwd in cwds or self.cwds)
+
+    def change_dir(self, call: Call, after: str) -> None:
+        operands = [arg for arg in call.args if not arg.startswith("-")]
+        target = operands[0] if operands else "~"
+        known = call.program != "popd" and "-" not in call.args
+        new = [self.path(target, cwd) if known else None for cwd in self.cwds]
+        self.history = list(dict.fromkeys(self.history + new))
+        if after == "&&":
+            self.cwds = list(dict.fromkeys(new))
+            return
+        self.cwds = list(dict.fromkeys(self.cwds + new))
+
+    def shell(self, call: Call, command: Command, depth: int) -> Denial | None:
+        has_c, operand = shell_script(call.args)
+        if has_c and operand is not None:
+            return self.subshell(operand, depth + 1)
+        if not has_c and operand is None and command.stdin:
+            return self.subshell("\n".join(command.stdin), depth + 1)
+        return None
+
+    def rm(self, call: Call, items: list[Command | str], index: int) -> Denial | None:
+        recursive, ended, targets = False, False, []
+        for arg in call.args:
+            if ended or not arg.startswith("-") or arg == "-":
+                targets.append(arg)
+                continue
+            ended = arg == "--"
+            short = not arg.startswith("--") and ("r" in arg or "R" in arg)
+            recursive = recursive or short or arg == "--recursive"
+        if not recursive:
+            return None
+        if call.via_xargs and not self.from_allowed_find(items, index):
+            return Denial(
+                "rm-outside-allowed-dirs",
+                "`xargs rm -r` takes its paths from stdin, so they cannot be checked",
+                f"run `rm -r` on literal paths inside {self.allowed_text()}, or feed it from a "
+                "`find` whose start paths are there.",
+            )
+        outside = [target for target in targets if not self.allowed(target)]
+        if not outside:
+            return None
+        return self.rm_denial("`rm -r`", outside)
+
+    def from_allowed_find(self, items: list[Command | str], index: int) -> bool:
+        previous = items[index - 1] if index > 0 else None
+        if not isinstance(previous, Command) or previous.after not in PIPES:
+            return False
+        call = unwrap(previous.words)
+        if call is None or call.program != "find":
+            return False
+        return all(self.allowed(root) for root in find_roots(call.args))
+
+    def find(self, call: Call) -> Denial | None:
+        outside = [root for root in find_roots(call.args) if not self.allowed(root)]
+        if not outside:
+            return None
+        return self.rm_denial("`find -delete`/`-exec rm`", outside)
+
+    def allowed_text(self) -> str:
+        return "the temp dir, the Claude scratchpad or allowed_rm_dirs"
+
+    def rm_denial(self, what: str, outside: list[str]) -> Denial:
+        return Denial(
+            "rm-outside-allowed-dirs",
+            f"{what} on {', '.join(outside)}, which is not inside {self.allowed_text()} "
+            "(a path with a variable or in an unknown directory counts as outside)",
+            "delete only literal paths in those dirs, add the dir to allowed_rm_dirs in the "
+            "guard config, or ask the person to delete it.",
+        )
+
+    def git(self, call: Call) -> Denial | None:
+        dirs = list(self.cwds)
+        args = call.args
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            arg = args[i]
+            value = args[i + 1] if arg in ("-C", "--work-tree") and i + 1 < len(args) else None
+            value = arg.split("=", 1)[1] if arg.startswith("--work-tree=") else value
+            dirs = [self.path(value, d) for d in dirs] if value is not None else dirs
+            i += 2 if arg in GIT_VALUE_OPTIONS else 1
+        if i >= len(args):
+            return None
+        sub, rest = args[i], args[i + 1 :]
+        if sub == "push":
+            return self.push(rest)
+        discard = self.discards(sub, rest, dirs)
+        if discard is None or all(self.inside(d) for d in dirs):
+            return None
+        return Denial(
+            "git-discard",
+            f"`git {discard}` throws away uncommitted work and cannot be undone",
+            "keep the work with `git stash` or a commit, discard single files by name, or ask "
+            "the person. It is allowed only in a repository inside the temp dir or scratchpad.",
+        )
+
+    def push(self, rest: list[str]) -> Denial | None:
+        force = any(
+            arg == "--force" or arg.startswith("+") or short_flag(arg, "f", "o") for arg in rest
+        )
+        if force:
+            return Denial(
+                "force-push",
+                "`git push --force` (or `-f`, `+refspec`) overwrites the remote branch",
+                "push without force. If the history really must be rewritten, the person runs "
+                "the force-push; a subagent puts it in its report.",
+            )
+        lease = any(a == "--force-with-lease" or a.startswith("--force-with-lease=") for a in rest)
+        setting = self.config.allow_force_with_lease
+        if not lease or setting is True or (setting == "main" and not self.subagent):
+            return None
+        return Denial(
+            "force-with-lease",
+            "`git push --force-with-lease` still rewrites the remote branch, and "
+            "allow_force_with_lease in the guard config does not allow it here",
+            "push without force, or put the push in your report so the team lead runs it "
+            "after the person approves.",
+        )
+
+    def discards(self, sub: str, rest: list[str], dirs: list[str | None]) -> str | None:
+        if sub == "reset" and "--hard" in rest:
+            return "reset --hard"
+        if sub == "clean":
+            force = "--force" in rest or any(short_flag(a, "f", "e") for a in rest)
+            dry = "--dry-run" in rest or any(short_flag(a, "n", "e") for a in rest)
+            return "clean -f" if force and not dry else None
+        if sub not in ("checkout", "restore"):
+            return None
+        whole = [arg for arg in rest if self.whole_tree(arg, dirs)]
+        if not whole:
+            return None
+        staged = "--staged" in rest or any(short_flag(a, "S", "s") for a in rest)
+        worktree = "--worktree" in rest or any(short_flag(a, "W", "s") for a in rest)
+        if sub == "restore" and staged and not worktree:
+            return None
+        return f"{sub} {whole[0]}"
+
+    def whole_tree(self, arg: str, dirs: list[str | None]) -> bool:
+        if arg in WHOLE_TREE:
+            return True
+        if arg.startswith("-"):
+            return False
+        for d in dirs:
+            path = self.path(arg, d)
+            if d is not None and path is not None and PurePath(d).is_relative_to(path):
+                return True
+        return False
+
+    def secret_read(
+        self, call: Call, command: Command, items: list[Command | str], index: int
+    ) -> Denial | None:
+        files = reader_files(call.program, call.args)
+        if files is None:
+            return None
+        files += [target for op, target in command.redirects if op == "<"]
+        secret = next((file for file in files if self.is_secret(file)), None)
+        if secret is None or self.safe_pipe(items, index):
+            return None
+        return Denial(
+            "secret-read",
+            f"`{call.program}` would print {secret} raw into the transcript, and the file "
+            "matches secret_globs",
+            "show key names or masked values instead (a script that parses the file and "
+            "prints its keys), count or list matches with `grep -c`/`-l`/`-q`, or pipe the "
+            "output through a filter listed in safe_filters.",
+        )
+
+    def is_secret(self, file: str) -> bool:
+        return self.matches(file, self.config.secret_globs) and not self.matches(
+            file, self.config.secret_allow_globs
+        )
+
+    def matches(self, file: str, globs: list[str]) -> bool:
+        name = PurePath(file).name
+        paths = [file] + [p for p in (self.path(file, cwd) for cwd in self.cwds) if p]
+        for pattern in globs:
+            if "/" not in pattern and fnmatchcase(name, pattern):
+                return True
+            anchored = pattern if pattern.startswith("/") else "*/" + pattern
+            if "/" in pattern and any(
+                fnmatchcase(p, anchored) or fnmatchcase(p, pattern) for p in paths
+            ):
+                return True
+        return False
+
+    def safe_pipe(self, items: list[Command | str], index: int) -> bool:
+        command = items[index]
+        following = items[index + 1] if index + 1 < len(items) else None
+        if not isinstance(command, Command) or command.after not in PIPES:
+            return False
+        if not isinstance(following, Command):
+            return False
+        call = unwrap(following.words)
+        if call and call.program == "wc":
+            return True
+        if call and call.program in GREPS and reader_files(call.program, call.args) is None:
+            return True
+        text = " ".join(following.words)
+        return any(pattern.search(text) for pattern in self.config.safe_filters)
+
+    def database(self, call: Call, command: Command) -> Denial | None:
+        for host in db_hosts(call):
+            if any(pattern.search(host) for pattern in self.config.prod_db_hosts):
+                return Denial(
+                    "prod-db",
+                    f"`{call.program}` connects to {host}, which matches prod_db_hosts",
+                    "work against a local or staging database; production queries are for "
+                    "the person to run.",
+                )
+        if any(DESTRUCTIVE_SQL.search(text) for text in call.args + command.stdin):
+            return Denial(
+                "destructive-sql",
+                f"`{call.program}` gets DROP DATABASE/TABLE/SCHEMA or TRUNCATE",
+                "leave destructive SQL to the person, or use a migration or a reset command "
+                "the project documents.",
+            )
+        return None
+
+
+def deny(denial: Denial, warnings: list[str]) -> dict[str, Any]:
+    reason = f"agent-harness guard, rule {denial.rule}: {denial.what}. To proceed: {denial.proceed}"
+    if warnings:
+        reason += " Guard config warnings: " + "; ".join(warnings) + "."
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def decision(event: dict[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
+    if event.get("tool_name") != "Bash":
+        return None
+    command = (event.get("tool_input") or {}).get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
+    project_dir = environ.get("CLAUDE_PROJECT_DIR") or cwd
+    config = load_config(environ, Path(project_dir) if project_dir else None)
+    subagent = bool(event.get("agent_type"))
+    if config.scope != "all" and not subagent:
+        return None
+    denial = Checker(config, environ, cwd or project_dir, subagent).script(command)
+    for pattern, reason in config.extra_deny:
+        if denial is None and pattern.search(command):
+            denial = Denial(
+                "extra_deny", reason.rstrip("."), "change the command or ask the person."
+            )
+    return deny(denial, config.warnings) if denial else None
+
+
+def main(
+    stdin: TextIO = sys.stdin,
+    stdout: TextIO = sys.stdout,
+    environ: Mapping[str, str] = os.environ,
+) -> int:
+    try:
+        verdict = decision(json.load(stdin), environ)
+    except Exception as error:
+        print(
+            f"guard_shell.py allowed the command after an internal error: {error!r}",
+            file=sys.stderr,
+        )
+        return 0
+    if verdict is not None:
+        json.dump(verdict, stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

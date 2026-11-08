@@ -46,6 +46,7 @@ its own marketplace.
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
 | `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory. |
+| `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database ([rules](#shell-guard)). |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
 ```mermaid
@@ -93,6 +94,71 @@ Then, per project:
    that cover the change and their command, and the team lead decides whether to run them.
    The hook runs that repository's command through the shell although Claude Code itself does
    not load that repository's settings, so edit only repositories whose settings you trust.
+
+## Shell guard
+
+`hooks/guard_shell.py` checks each Bash command of a subagent before it runs, or of every
+session with `"scope": "all"`. It parses the command, so it also sees `;`/`&&`/`||` chains,
+pipes, subshells, `$(…)`, `bash -c`/`sh -c`, `eval`, heredocs fed to a shell, `sudo`, `env`,
+`nohup` and `timeout` prefixes, variable assignments, quoting tricks and absolute binary paths.
+Each deny reason names the rule and how to proceed.
+
+| Rule | Denied | Allowed |
+|---|---|---|
+| `force-push` | `git push --force`, `-f`, `+refspec` | a normal push |
+| `force-with-lease` | `git push --force-with-lease` from a subagent | from the main agent, by default |
+| `git-discard` | `git reset --hard`, `git clean -f`, `git checkout .`/`-- .`, `git restore .` | in a repository inside the temp dirs; `clean -n`, `restore --staged .`, single files |
+| `rm-outside-allowed-dirs` | `rm -r`/`-rf`/`-fr`/`-R`, `find -delete`/`-exec rm`, `xargs rm -r` outside the allowed dirs | below `$TMPDIR` (`/tmp` when unset) or `/tmp/claude-*`, and in `allowed_rm_dirs` |
+| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `strings`, `xxd`, `base64` of a file in `secret_globs` | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c` or a `safe_filters` match; `secret_allow_globs` |
+| `prod-db` | `mysql`, `mariadb`, `psql`, `mongosh`, `mongo`, `redis-cli` whose `-h`/`--host`, URI, `host=` or `PGHOST`/`MYSQL_HOST` matches `prod_db_hosts` | any host while `prod_db_hosts` is empty (the default) |
+| `destructive-sql` | `DROP DATABASE`/`TABLE`/`SCHEMA` or `TRUNCATE` in a database client's arguments or heredoc, for any host | `SELECT TRUNCATE(x, 2)` |
+| `extra_deny` | a command matching one of your regexes, with your reason | |
+
+A relative path resolves against the working directory and follows `cd` in the command. A
+path with an unknown variable or `$(…)`, or in an unknown directory, counts as outside.
+`/tmp/claude-501` itself is not below `/tmp/claude-*`, so it stays protected.
+
+The settings merge built-in defaults, `~/.claude/agent-harness/guard.json` (under
+`$HARNESS_HOME` when set) and the `guard` key of the project's `.claude/agent-harness.json`.
+Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the last value.
+
+| Key | Default |
+|---|---|
+| `scope` | `"subagents"`: only events with an `agent_type`; `"all"` checks the main session too |
+| `allow_force_with_lease` | `"main"`: the main agent only; `true` or `false` for everyone |
+| `secret_globs` | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `*credentials*`, `auth.json` |
+| `secret_allow_globs` | `.env.example`, `.env.dist`, `*.pub` |
+| `allowed_rm_dirs` | none; each entry allows the dir and everything in it; a relative entry is relative to the project |
+| `prod_db_hosts` | none; case-insensitive regexes searched in the host |
+| `safe_filters` | none; regexes searched in the pipe stage right after the read, its words joined by single spaces without quotes (`grep -v -E 'a\|b'` becomes `grep -v -E a\|b`) |
+| `extra_deny` | none; `{"pattern": "<regex searched in the whole command>", "reason": "<text>"}` |
+
+A glob without `/` matches the file name, one with `/` the path at any depth. An invalid file
+or key is ignored and named in the next deny reason. An internal error lets the command through
+and logs to stderr. Example ([`examples/agent-harness.json`](examples/agent-harness.json)):
+
+```json
+{
+  "guard": {
+    "scope": "subagents",
+    "allow_force_with_lease": "main",
+    "secret_globs": ["deploy/ci-secrets.yml", "config/*.secret.yaml"],
+    "allowed_rm_dirs": ["var/cache", "node_modules"],
+    "prod_db_hosts": ["^prod-db\\.", "\\.prod\\.example\\.com$"],
+    "safe_filters": ["^grep -v -i -E \\S*(token|password|secret)\\S*$"],
+    "extra_deny": [
+      {
+        "pattern": "\\bterraform\\s+(apply|destroy)\\b",
+        "reason": "Terraform changes real infrastructure"
+      }
+    ]
+  }
+}
+```
+
+The guard catches mistakes; it is not a sandbox against deliberate evasion. It does not see
+inside scripts a command runs (`./clean.sh`, `python -c`, `make`), commands piped into `sh`,
+or what `docker exec` and `ssh` run elsewhere, and it does not check the Read tool.
 
 ## The estimator
 
