@@ -17,6 +17,7 @@ HEADER = (
 
 
 MINUTE = 1 / 60
+DRIFT = 0.005
 
 
 def prediction(record: Record) -> Prediction:
@@ -171,8 +172,31 @@ def _rejections(variant: str, records: Sequence[Record]) -> str:
         return ""
     rejected = sum(1 for record in records if record.error.startswith((REJECTED, REJECTED_UNCITED)))
     uncited = sum(1 for record in records if record.error.startswith(REJECTED_UNCITED))
+    retried = sum(1 for record in records if record.retried)
+    kept = sum(1 for record in records if record.check_errors)
     return (
         f"; {rejected} rejected by the estimate check, {uncited} of them for an uncited adjustment"
+        f"; {retried} retried after the check, {kept} kept after the check failed (stated total)"
+        + _drift(records)
+    )
+
+
+def _drift(records: Sequence[Record]) -> str:
+    """Reference-mode blocks whose median is not the one retrieved: the model moved the
+    starting point without an adjustment."""
+    pairs = [
+        (record.block_reference_median, record.reference_median)
+        for record in records
+        if record.block_mode == "reference"
+        and record.block_reference_median is not None
+        and record.reference_median is not None
+    ]
+    if not pairs:
+        return ""
+    drifted = sum(1 for written, retrieved in pairs if abs(written - retrieved) > DRIFT)
+    return (
+        f"; median drift: {drifted} of {len(pairs)} reference-mode blocks "
+        f"({drifted / len(pairs):.0%}) wrote a median other than the retrieved one"
     )
 
 

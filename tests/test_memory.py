@@ -1,6 +1,8 @@
+import calendar
 import importlib.util
 import itertools
 import json
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -353,7 +355,35 @@ def test_a_ticket_sees_only_lessons_learned_before_it_and_not_expired(lesson, of
     assert lesson.usable_on(day) == brute_force_usable(lesson, day)
 
 
-def test_memory_filters_by_the_tickets_creation_day():
+@pytest.fixture
+def local_zone(monkeypatch):
+    def use(name):
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    yield use
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Europe/Prague", "America/New_York", "Asia/Tokyo"])
+def test_a_ticket_created_near_midnight_sees_the_lessons_of_its_local_day(local_zone, zone):
+    local_zone(zone)
+    agent_memory = Memory(tuple(LESSONS))
+    for day in ("2026-01-10", "2026-01-11", "2026-01-20", "2026-02-01"):
+        for minutes in range(-15 * 60, 15 * 60 + 1, 20):
+            moment = date.fromisoformat(day)
+            epoch = calendar.timegm(moment.timetuple()) + minutes * 60
+            utc = time.gmtime(epoch)
+            created = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", utc)
+            local = time.localtime(epoch)
+            local_day = date(local.tm_year, local.tm_mon, local.tm_mday)
+            expected = [lesson for lesson in LESSONS if brute_force_usable(lesson, local_day)]
+            assert agent_memory.usable_on(created) == expected, created
+
+
+def test_memory_filters_by_the_tickets_creation_day(local_zone):
+    local_zone("UTC")
     agent_memory = Memory(tuple(LESSONS))
 
     assert agent_memory.dated == 3

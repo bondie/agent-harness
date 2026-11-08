@@ -8,14 +8,20 @@ description: Work a tracker ticket end to end with the agent team - analyse, est
 You are the team lead. The subagents do the work; you route it, keep the person informed and
 own every decision that leaves this machine. Ticket key: the argument (ask for it if missing).
 
+Start every subagent task with the key and a colon, `<KEY>: …`. The plugin files each run's
+report under that key; a task without it lands in an `adhoc-…` directory that the retro
+and the evals cannot find.
+
 ## 1. Analyse
 
-Run the `jira-analyst` subagent with the key. When its analysis lists open questions that
+Run the `jira-analyst` subagent with the key ("SHOP-412: analyse the ticket"). When its
+analysis lists open questions that
 block the work, show them to the person and stop until they are answered.
 
 ## 2. Estimate
 
-Run the `estimator` subagent with the key and the analysis. Pass the analysis as written,
+Run the `estimator` subagent with the key and the analysis ("SHOP-412: estimate this plan
+for <person>. …"). Pass the analysis as written,
 including its implementation plan; never pass the ticket's existing estimate, story points
 or logged time.
 
@@ -53,15 +59,18 @@ person says yes, show the exact text first, and use the tracker's own markup.
 ## 4. Implement
 
 Run the `implementer` subagent with the approved approach, the acceptance criteria and any
-adjustments. The plugin's hook runs the project's tests after each edit while it works, and
-the repository's quality gate (`.claude/agent-harness.json`) when it finishes; read
-`gates.json` before you trust that the checks passed. The plugin keeps every agent's report
-and structured block in `$HARNESS_HOME/tickets/<KEY>/` for the retro.
+adjustments ("SHOP-412: implement the approved change. …"). The plugin's hook runs the
+project's tests after each edit while it works, and the repository's quality gate
+(`.claude/agent-harness.json`) when it finishes; read `gates.json` before you trust that the
+checks passed. The plugin keeps every agent's report and structured block in
+`~/.claude/agent-harness/tickets/<KEY>/` (under `$HARNESS_HOME` when set) for the retro.
 
 ## 5. Review
 
-Run the `reviewer-qa` subagent. When it requests changes, send the findings to the
-`implementer` and review again; after two rounds, stop and show the person what is left.
+Run the `reviewer-qa` subagent ("SHOP-412: review the change. …"). When it requests
+changes, send the findings to the `implementer` ("SHOP-412: fix these review findings. …")
+and review again; after two rounds, stop and show the person what is left. Each round keeps
+its own review block for the retro.
 
 ## 6. Gate: hand over
 

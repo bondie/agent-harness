@@ -78,7 +78,7 @@ actually done, either similar tickets or the calibration in your memory.
 - Hours mean all logged work on the ticket: analysis, implementation, review, testing,
   deployment and communication, as the logged time you compare with includes it.
 - Do not split hairs: round the estimate and each part to the nearest half hour (a part
-  below that to a quarter hour).
+  below that to a quarter hour). Halves round up: 1.25 h becomes 1.5 h.
 - When fewer than three relevant neighbours or calibration tickets remain, say that the
   estimate rests on weak evidence and widen the range.
 - You never write to the tracker. The only files you write are in your memory directory.
@@ -128,7 +128,9 @@ body is one JSON object:
 ```
 
 - `mode`: `"bottom-up"` for a priced plan, `"reference"` for a reference class forecast.
-- `reference_median`: the median of the neighbours you anchored on; `null` in bottom-up mode.
+- `reference_median`: exactly the median the reference tool returned (`effort_reference`, or
+  the reference class in the message), not a rounded or hand-picked one; `null` in bottom-up
+  mode. Starting from another number is an adjustment and needs a citation like any other.
 - `parts`: in bottom-up mode, each part of the plan with `name`, `kind` (`implementation`,
   `verification` or `release`), `hours` and `evidence`. In reference mode, leave it empty:
   the reference median and the adjustments carry the estimate.
@@ -137,9 +139,10 @@ body is one JSON object:
 - Evidence items and citations are ticket keys (`SHOP-398`), repository-relative paths
   (`src/shop/export.py`) or `measured:<ref>` for a measured time in your memory. Every part
   needs at least one; an adjustment without a citation is rejected.
-- `total` is ignored and recomputed by code: the reference median, or the sum of the parts,
-  plus the adjustments, rounded to the nearest half hour and never below half an hour. Give
-  that number as the Estimate. A hook checks the block and sends an invalid one back to you
-  with the errors.
+- `total` must equal what code computes from the block: the reference median, or the sum of
+  the parts, plus the adjustments, rounded to the nearest half hour with halves rounded up
+  (1.25 becomes 1.5) and never below half an hour. Give that number as the Estimate. A hook
+  checks the block and sends it back to you with the errors when it is invalid or its
+  `total` differs.
 
 When the request asks for JSON, return only the JSON object it describes.

@@ -1,9 +1,11 @@
+import numpy as np
 import pytest
 
 from agent_harness.gitlog import (
     DEFAULT_TEST_PATTERNS,
     FileChange,
     changes,
+    changes_by_term,
     diff,
     is_test,
     mentions,
@@ -102,7 +104,7 @@ def test_ticket_from_the_commit_message(git_repo):
     sha = git_repo.commit("fix: rounding - SHOP-412", {"a": "a"})
     attribution = ticket_of(git_repo.path, sha)
     assert attribution is not None
-    assert (attribution.ticket, attribution.found_in) == ("SHOP-412", "the commit message")
+    assert (attribution.candidates, attribution.found_in) == (("SHOP-412",), "the commit message")
 
 
 def test_ticket_from_the_first_merge_that_brought_the_commit_in(git_repo):
@@ -121,12 +123,91 @@ def test_ticket_from_the_first_merge_that_brought_the_commit_in(git_repo):
     attribution = ticket_of(git_repo.path, sha)
 
     assert attribution is not None
-    assert (attribution.ticket, attribution.found_in) == ("SHOP-412", "the merge commit")
+    assert (attribution.candidates, attribution.found_in) == (("SHOP-412",), "the merge commit")
 
 
 def test_no_ticket_anywhere(git_repo):
     sha = git_repo.commit("fix rounding", {"a": "a"})
     assert ticket_of(git_repo.path, sha) is None
+
+
+@pytest.mark.parametrize("branched_after_the_hotfix", [False, True])
+def test_a_commit_made_on_the_target_branch_is_not_blamed_on_a_later_merge(
+    git_repo, branched_after_the_hotfix
+):
+    git_repo.commit("init", {"a": "a"})
+    git_repo.git("checkout", "-q", "-b", "dev")
+    if not branched_after_the_hotfix:
+        git_repo.git("branch", "feature/SHOP-999")
+    hotfix = git_repo.commit("hotfix rounding", {"a": "b"})
+    if branched_after_the_hotfix:
+        git_repo.git("branch", "feature/SHOP-999")
+    git_repo.git("checkout", "-q", "feature/SHOP-999")
+    git_repo.commit("feature work", {"f": "f"})
+    git_repo.git("checkout", "-q", "dev")
+    git_repo.git("merge", "-q", "--no-ff", "feature/SHOP-999", "-m", "Merge feature/SHOP-999")
+
+    assert ticket_of(git_repo.path, hotfix) is None
+
+
+def test_names_of_standards_are_not_ticket_keys(git_repo):
+    sha = git_repo.commit("Read the feed as UTF-8, sign with SHA-256 per RFC-7515 - SHOP-412")
+    attribution = ticket_of(git_repo.path, sha)
+    assert attribution is not None
+    assert attribution.candidates == ("SHOP-412",)
+    plain = git_repo.commit("Format to PSR-12 and ISO-8601")
+    assert ticket_of(git_repo.path, plain) is None
+
+
+def test_every_key_of_the_message_is_a_candidate(git_repo):
+    sha = git_repo.commit("fix: SHOP-2 regression from SHOP-1, see SHOP-2")
+    attribution = ticket_of(git_repo.path, sha)
+    assert attribution is not None
+    assert attribution.candidates == ("SHOP-2", "SHOP-1")
+
+
+def test_two_distinct_commits_with_the_same_message_and_changes_both_count(git_repo, monkeypatch):
+    git_repo.commit("init", {"a.txt": "a\n"})
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2026-03-02T10:00:00+00:00")
+    git_repo.commit("fix typo SHOP-1", {"a.txt": "b\n"})
+    git_repo.commit("revert", {"a.txt": "a\n"})
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2026-03-03T10:00:00+00:00")
+    git_repo.commit("fix typo SHOP-1", {"a.txt": "b\n"})
+
+    assert diff(changes(git_repo.path, "SHOP-1")).added == 2
+
+
+def test_rev_leaves_out_a_lingering_branch(git_repo):
+    git_repo.commit("init", {"a.txt": "a\n"})
+    git_repo.git("checkout", "-q", "-b", "feature/SHOP-1")
+    git_repo.commit("wip SHOP-1", {"a.txt": "a\nb\n"})
+    git_repo.commit("more SHOP-1", {"a.txt": "a\nb\nc\n"})
+    git_repo.git("checkout", "-q", "main")
+    git_repo.git("merge", "-q", "--squash", "feature/SHOP-1")
+    git_repo.git("commit", "-q", "-m", "feat: price SHOP-1")
+
+    assert diff(changes(git_repo.path, "SHOP-1")).added == 4
+    assert diff(changes(git_repo.path, "SHOP-1", rev="main")).added == 2
+
+
+def test_one_pass_over_the_log_finds_what_one_grep_per_key_finds(git_repo):
+    rng = np.random.default_rng(5)
+    keys = ["SHOP-1", "SHOP-12", "SHOP-2", "PROJ-7", "SHOP-99"]
+    git_repo.commit("init", {"a.txt": "a\n"})
+    for index in range(40):
+        named = [keys[i] for i in rng.permutation(len(keys))[: int(rng.integers(0, 3))]]
+        files = {f"f{int(rng.integers(0, 5))}.txt": f"{index}\n" * int(rng.integers(1, 4))}
+        if rng.random() < 0.2:
+            git_repo.git("checkout", "-q", "-B", f"side{index % 3}")
+        git_repo.commit(f"change {index} {' '.join(named)}".strip(), files)
+        git_repo.git("checkout", "-q", "main")
+
+    for rev in (None, "main"):
+        one_pass = changes_by_term(git_repo.path, [*keys, "SHOP-1"], rev)
+        assert list(one_pass) == keys
+        for key in keys:
+            assert one_pass[key] == changes(git_repo.path, key, rev)
+    assert changes_by_term(git_repo.path, []) == {}
 
 
 def test_resolve_a_commit(git_repo):

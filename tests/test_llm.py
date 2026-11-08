@@ -7,6 +7,7 @@ import pytest
 
 from agent_harness.baselines import NeighbourMedian
 from agent_harness.dataset import load_targets
+from agent_harness.estimate_check import round_half
 from agent_harness.llm import (
     AGENT_FILE,
     ESTIMATE_SCHEMA,
@@ -252,6 +253,77 @@ def test_the_structured_variant_lets_code_compute_the_estimate(store, searcher):
     system = backend.calls[0][0]
     assert "harness-estimate block only" in system
     assert "median_hours" not in system
+
+
+class Answers:
+    name = "fake"
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def complete(self, system, user, schema=SCHEMA):
+        self.calls.append(user)
+        return self.answers[len(self.calls) - 1], 0.01
+
+
+UNCITED_BLOCK = {
+    **BLOCK,
+    "adjustments": [{"hours": 1, "reason": "bigger", "citation": ""}],
+    "total": 3.0,
+}
+
+
+def test_the_reference_total_starts_from_the_retrieved_median(store, searcher):
+    shop = target(store, "SHOP-6")
+    retrieved = recent_median(searcher, shop)
+    drifted = {**BLOCK, "reference_median": retrieved + 3}
+    estimator = LLMEstimator(Recorder(drifted), searcher, since="2026-01-01", structured=True)
+
+    estimate = estimator.estimate(shop)
+
+    assert estimate is not None
+    assert estimate.median == round_half(retrieved + 0.5)
+    assert (estimate.block_mode, estimate.block_reference_median) == ("reference", retrieved + 3)
+    assert estimate.reference_median == retrieved
+    assert not estimate.retried
+    alone = LLMEstimator(Recorder(drifted), searcher, context="none", structured=True)
+    without_reference = alone.estimate(shop)
+    assert without_reference is not None
+    assert without_reference.median == round_half(retrieved + 3.5)
+
+
+def test_a_rejected_block_is_retried_once_with_the_errors(store, searcher):
+    backend = Answers(UNCITED_BLOCK, BLOCK)
+    estimator = LLMEstimator(backend, searcher, context="none", structured=True)
+
+    estimate = estimator.estimate(target(store, "SHOP-6"))
+
+    assert estimate is not None
+    assert (estimate.median, estimate.retried, estimate.check_errors) == (1.5, True, ())
+    assert estimate.cost_usd == pytest.approx(0.02)
+    assert len(backend.calls) == 2
+    assert backend.calls[1].startswith(backend.calls[0])
+    assert "rejected by the estimate check: adjustments[0]" in backend.calls[1]
+    assert "has no citation" in backend.calls[1]
+
+
+def test_after_a_second_rejection_the_stated_total_is_kept(store, searcher):
+    backend = Answers(UNCITED_BLOCK, {**UNCITED_BLOCK, "total": 2.5})
+    estimator = LLMEstimator(backend, searcher, context="none", structured=True)
+
+    estimate = estimator.estimate(target(store, "SHOP-6"))
+
+    assert estimate is not None
+    assert (estimate.median, estimate.retried) == (2.5, True)
+    assert any("has no citation" in error for error in estimate.check_errors)
+    assert estimate.cost_usd == pytest.approx(0.02)
+
+    without_total = Answers(UNCITED_BLOCK, {"mode": "gut"})
+    estimator = LLMEstimator(without_total, searcher, context="none", structured=True)
+    with pytest.raises(LLMError, match=f"^{REJECTED}") as failure:
+        estimator.estimate(target(store, "SHOP-6"))
+    assert failure.value.cost_usd == pytest.approx(0.02)
 
 
 def test_an_uncited_adjustment_fails_with_its_cost():

@@ -6,7 +6,8 @@ paths match when they are equal or one ends with the other after a slash, so a r
 prefix or an absolute path still matches a repository-relative one.
 
 Reviewer: the findings by severity and by the disposition the retro gave them, and the defects
-that reached production after a review.
+that reached production after a review. Each review round counts its own findings: F1 of round 1
+and F1 of round 2 are two findings.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .artifacts import DISPOSITIONS, Json, read_json, read_object, report_blocks
+from .artifacts import DISPOSITIONS, Json, read_json, read_object, report_blocks, review_rounds
 
 SEVERITIES = ("blocker", "major", "minor")
 UNSET = "unset"
@@ -165,8 +166,9 @@ class ReviewCheck:
     reviewed: bool
     verdict: str | None
     findings: tuple[tuple[str, str], ...]
-    """(severity, disposition) of each finding."""
+    """(severity, disposition) of each finding of every round."""
     escaped: int
+    rounds: int = 1
 
     @property
     def escaped_after_review(self) -> bool:
@@ -174,24 +176,32 @@ class ReviewCheck:
 
 
 def review_check(directory: Path) -> ReviewCheck | None:
-    review = read_object(directory / "review.json")
+    reviews = [read_object(path) or {} for path in review_rounds(directory)]
     escaped = read_json(directory / "escaped.json")
     escaped = [] if escaped is None else escaped
     if not isinstance(escaped, list):
         raise ValueError(f"{directory / 'escaped.json'} must hold a JSON list")
-    if review is None and not escaped:
+    if not reviews and not escaped:
         return None
-    findings = review.get("findings") if review else None
+    latest = reviews[-1] if reviews else None
     return ReviewCheck(
         ticket=directory.name,
-        reviewed=review is not None,
-        verdict=str(review["verdict"]) if review and review.get("verdict") else None,
+        reviewed=latest is not None,
+        verdict=str(latest["verdict"]) if latest and latest.get("verdict") else None,
         findings=tuple(
             (severity(finding), disposition(finding))
-            for finding in (findings if isinstance(findings, list) else [])
-            if isinstance(finding, dict)
+            for review in reviews
+            for finding in _findings(review)
         ),
         escaped=len(escaped),
+        rounds=len(reviews),
+    )
+
+
+def _findings(review: Json) -> list[Json]:
+    findings = review.get("findings")
+    return (
+        [item for item in findings if isinstance(item, dict)] if isinstance(findings, list) else []
     )
 
 
@@ -292,6 +302,7 @@ def _review_json(check: ReviewCheck) -> Json:
         "ticket": check.ticket,
         "reviewed": check.reviewed,
         "verdict": check.verdict,
+        "rounds": check.rounds,
         **asdict(counts),
         "acceptance_rate": counts.acceptance_rate,
         "escaped": check.escaped,

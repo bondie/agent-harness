@@ -27,6 +27,10 @@ class Estimate:
     lessons: int | None = None
     lessons_dated: int | None = None
     lessons_undated: int | None = None
+    block_mode: str | None = None
+    block_reference_median: float | None = None
+    retried: bool = False
+    check_errors: tuple[str, ...] = ()
 
 
 class Estimator(Protocol):

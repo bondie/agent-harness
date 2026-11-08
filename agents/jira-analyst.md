@@ -64,7 +64,7 @@ The only files you write are your own notes in your memory directory.
 - **Structured block:** end the answer with one fenced block whose info string is
   `json harness-analysis`, holding one JSON object with an entry per file of the plan
   (`tests` is true when the plan names a test for it). The plugin saves it per ticket for the
-  estimator, the evaluation and the retro:
+  evaluation and the retro; the lead passes your analysis to the next agent itself:
 
   ```json harness-analysis
   {"ticket": "SHOP-412", "repositories": ["shop"], "plan": [{"repo": "shop", "file": "src/Feed/Export.php", "change": "retry the upload once", "tests": true}]}

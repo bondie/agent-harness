@@ -17,7 +17,7 @@ from ticket_precedent.search import Searcher
 
 from .baselines import Estimate
 from .dataset import Target
-from .estimate_check import KINDS, MODES, UNCITED, is_citation, validate_and_total
+from .estimate_check import KINDS, MODES, UNCITED, is_citation, number, validate_and_total
 from .memory import Memory, memory_section
 
 AGENT_FILE = Path(__file__).resolve().parents[2] / "agents" / "estimator.md"
@@ -102,6 +102,10 @@ STRUCTURED = "-structured"
 WITH_MEMORY = "+memory"
 REJECTED = "rejected: "
 REJECTED_UNCITED = "rejected, uncited adjustment: "
+RETRY = (
+    "Your harness-estimate block was rejected by the estimate check: {errors} Answer again with "
+    "a corrected block."
+)
 
 
 class LLMError(RuntimeError):
@@ -188,19 +192,69 @@ def parse_estimate(payload: dict[str, Any], cost: float, note: str = "") -> Esti
     return Estimate(median=median, p25=low, p75=high, cited=cited, cost_usd=cost, note=note)
 
 
-def parse_structured(payload: dict[str, Any], cost: float, note: str = "") -> Estimate:
-    """The estimate code computes from a harness-estimate block; an invalid block fails."""
-    total, errors = validate_and_total(payload)
-    if errors or total is None:
+class RejectedError(LLMError):
+    def __init__(self, errors: list[str], payload: dict[str, Any], cost_usd: float) -> None:
         prefix = REJECTED_UNCITED if any(UNCITED in error for error in errors) else REJECTED
-        raise LLMError(prefix + " ".join(errors), cost_usd=cost)
-    return Estimate(median=total, cited=citations(payload), cost_usd=cost, note=note)
+        super().__init__(prefix + " ".join(errors), cost_usd)
+        self.errors = errors
+        self.payload = payload
+
+
+def parse_structured(
+    payload: dict[str, Any], cost: float, note: str = "", retrieved: float | None = None
+) -> Estimate:
+    """The estimate code computes from a harness-estimate block; an invalid block fails.
+
+    In reference mode the total starts from the `retrieved` median, not the one the model
+    wrote: a different starting point counts only through a cited adjustment.
+    """
+    total, errors = validate_and_total(payload)
+    mode = payload.get("mode")
+    if total is not None and mode == "reference" and retrieved is not None:
+        total, errors = validate_and_total({**payload, "reference_median": retrieved})
+    if errors or total is None:
+        raise RejectedError(errors, payload, cost)
+    return Estimate(
+        median=total,
+        cited=citations(payload),
+        cost_usd=cost,
+        note=note,
+        block_mode=str(mode),
+        block_reference_median=number(payload.get("reference_median")),
+    )
+
+
+def kept_after_check(rejected: RejectedError, cost: float, note: str) -> Estimate:
+    """The stated total of a block that failed the check twice, like the hook lets it through."""
+    stated = number(rejected.payload.get("total"))
+    if stated is None or stated < 0:
+        raise LLMError(str(rejected), cost)
+    mode = rejected.payload.get("mode")
+    return Estimate(
+        median=stated,
+        cited=citations(rejected.payload),
+        cost_usd=cost,
+        note=note,
+        block_mode=mode if isinstance(mode, str) else None,
+        block_reference_median=number(rejected.payload.get("reference_median")),
+        retried=True,
+        check_errors=tuple(rejected.errors),
+    )
 
 
 def citations(block: Mapping[str, Any]) -> tuple[str, ...]:
-    items = [item for part in block.get("parts") or [] for item in part.get("evidence") or []]
-    items += [adjustment.get("citation") for adjustment in block.get("adjustments") or []]
+    parts = [part for part in _list(block.get("parts")) if isinstance(part, dict)]
+    items = [item for part in parts for item in _list(part.get("evidence"))]
+    items += [
+        adjustment.get("citation")
+        for adjustment in _list(block.get("adjustments"))
+        if isinstance(adjustment, dict)
+    ]
     return tuple(dict.fromkeys(item.strip() for item in items if is_citation(item)))
+
+
+def _list(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 @dataclass
@@ -253,17 +307,34 @@ class LLMEstimator:
             usable = self.memory.usable_on(target.created)
             system += memory_section(usable)
             lessons = len(usable)
-        schema, parse = (
-            (ESTIMATE_SCHEMA, parse_structured) if self.structured else (SCHEMA, parse_estimate)
+        estimate = (
+            self._structured(system, message, note, median)
+            if self.structured
+            else parse_estimate(*self.backend.complete(system, message, SCHEMA), note)
         )
-        payload, cost = self.backend.complete(system, message, schema)
         return replace(
-            parse(payload, cost, note),
+            estimate,
             reference_median=median,
             lessons=lessons,
             lessons_dated=None if self.memory is None else self.memory.dated,
             lessons_undated=None if self.memory is None else self.memory.undated,
         )
+
+    def _structured(
+        self, system: str, message: str, note: str, retrieved: float | None
+    ) -> Estimate:
+        """One retry with the check's errors; after that the stated total is kept."""
+        payload, cost = self.backend.complete(system, message, ESTIMATE_SCHEMA)
+        try:
+            return parse_structured(payload, cost, note, retrieved)
+        except RejectedError as rejected:
+            retry = RETRY.format(errors=" ".join(rejected.errors))
+            payload, more = self.backend.complete(system, f"{message}\n\n{retry}", ESTIMATE_SCHEMA)
+            cost += more
+        try:
+            return replace(parse_structured(payload, cost, note, retrieved), retried=True)
+        except RejectedError as rejected:
+            return kept_after_check(rejected, cost, note)
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
