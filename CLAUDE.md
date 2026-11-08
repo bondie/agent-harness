@@ -1,19 +1,25 @@
 # agent-harness
 
-A Claude Code plugin (four subagents, a `ticket` skill, seven hooks, an MCP server entry) and the
-Python package that backtests its estimator and measures the team.
+A Claude Code plugin (four subagents, the `ticket`, `retro` and `stats` skills, a dynamic
+workflow, eight hook scripts, an MCP server entry) and the Python package that backtests its
+estimator and measures the team.
 
 ## Layout
 
 - `agents/*.md`: the subagents. `agents/estimator.md` is also the system prompt of the LLM
   variants in the evaluation, so a change to it changes the measured results: rerun the eval.
-- `skills/ticket/SKILL.md`: the team-lead flow with the two approval gates.
+- `skills/ticket/SKILL.md`: the team-lead flow with the two approval gates;
+  `skills/retro/SKILL.md` turns a finished ticket into approved memory lessons;
+  `skills/stats/SKILL.md` summarises the run log.
 - `workflows/*.js`: dynamic workflows shipped with the plugin (`/agent-harness:<name>`). Plain
   JavaScript, `meta` a pure literal, no clock or randomness; `tests/test_workflows.py` checks it.
 - `hooks/`: standard-library Python scripts called by `hooks/hooks.json`: the tracker, memory
   and shell guards (PreToolUse), `run_tests.py` (PostToolUse), `log_agent_runs.py`,
-  `save_artifacts.py` and `quality_gate.py` (SubagentStop). Keep them free of third-party
-  imports, they run with the user's `python3`; they may import each other.
+  `save_artifacts.py`, `quality_gate.py` and `estimate_check.py` (SubagentStop). The last two
+  also run as PreToolUse on `SubagentHandback`, where auto mode delivers a report before the
+  subagent stops; both paths share one block count per run. Keep them free of third-party
+  imports, they run with the user's `python3`; they may import each other, except
+  `estimate_check.py`, which `src/agent_harness/estimate_check.py` copies byte for byte.
 - `src/agent_harness/`: the backtest (`harness-eval`), which reads a ticket-precedent index,
   and the team measures (`export-case`, `eval`, `metrics`, `review-finding`, `escaped`), which
   read the ticket artifacts. The hooks cannot import it, so what both need is duplicated and

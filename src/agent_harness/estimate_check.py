@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SubagentStop hook: check the estimator's `harness-estimate` block and compute its total.
+"""SubagentStop and SubagentHandback hook: check the estimator's `harness-estimate` block.
 
 The estimator ends an estimate with a fenced block whose info string is
 `json harness-estimate`. Code, not the model, turns it into the number: the reference median,
@@ -7,9 +7,13 @@ or the sum of the parts, plus the adjustments, rounded to half an hour and never
 hour. A block that is missing or breaks a rule (an adjustment without a citation, a part
 without evidence, a total that differs from the computed one) keeps the estimator running
 with the errors as its next instruction, at most twice per run; after that the hook lets it
-stop and warns the person. A report handed back through SubagentHandback has already been
-delivered when the subagent stops, so for it the hook only warns. Reports without an
-"Estimate:" line (a retro, a recorded correction) are not checked.
+stop and warns the person. Reports without an "Estimate:" line (a retro, a recorded
+correction) are not checked.
+
+In auto mode the estimator delivers its report through SubagentHandback before it stops, so
+the same check runs as a PreToolUse hook on that tool and denies the call; the two paths share
+the block count. A handback the check already passed or let through is not checked again when
+the run stops; one that reached SubagentStop without that hook only gets a warning.
 
 `src/agent_harness/estimate_check.py` is a byte-identical copy that the backtest imports; a
 test keeps the two equal. Standard library only, and bad input never blocks the session.
@@ -27,6 +31,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 AGENT = "estimator"
+HANDBACK = "SubagentHandback"
 MAX_BLOCKS = 2
 MODES = ("bottom-up", "reference")
 KINDS = ("implementation", "verification", "release")
@@ -236,30 +241,90 @@ def state_path(event: Mapping[str, Any], environ: Mapping[str, str]) -> Path:
     )
 
 
-def _blocks_so_far(path: Path) -> int:
+def _state(path: Path) -> dict[str, Any]:
     try:
-        blocks = json.loads(path.read_text(encoding="utf-8")).get("blocks")
-    except (OSError, ValueError, AttributeError):
-        return 0
-    return blocks if isinstance(blocks, int) else 0
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
 
 
-def _record(path: Path, blocks: int, errors: list[str], handed_back: bool) -> None:
+def _blocks_so_far(path: Path) -> int:
+    blocks = _state(path).get("blocks")
+    return blocks if isinstance(blocks, int) and not isinstance(blocks, bool) else 0
+
+
+def _record(
+    path: Path, blocks: int, errors: list[str], handed_back: bool, delivered: bool = False
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {"blocks": blocks, "errors": errors, "handed_back": handed_back}
+    if delivered:
+        record["delivered"] = True
     path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _reason(errors: list[str], retry: str) -> str:
+    return (
+        "The harness-estimate block does not pass the check:\n"
+        + "\n".join(f"- {error}" for error in errors)
+        + f"\n{retry}"
+    )
+
+
+def _warning(errors: list[str], why: str) -> dict[str, Any]:
+    return {
+        "systemMessage": f"agent-harness: the estimator's harness-estimate block is invalid "
+        f"({why}): " + " ".join(errors)
+    }
+
+
+def handback_decision(
+    event: Mapping[str, Any], environ: Mapping[str, str]
+) -> dict[str, Any] | None:
+    """PreToolUse on SubagentHandback: deny an invalid estimate before it is delivered."""
+    tool_input = event.get("tool_input")
+    report = tool_input.get("message") if isinstance(tool_input, Mapping) else None
+    if event.get("tool_name") != HANDBACK or not isinstance(report, str):
+        return None
+    if not is_estimate(report):
+        return None
+    path = state_path(event, environ)
+    _, errors = check_report(report)
+    blocks = _blocks_so_far(path)
+    if errors and blocks < MAX_BLOCKS:
+        _record(path, blocks + 1, errors, handed_back=False)
+        retry = (
+            "Call SubagentHandback again with the whole report, ending with the corrected block."
+        )
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": _reason(errors, retry),
+            }
+        }
+    _record(path, blocks, errors, handed_back=True, delivered=True)
+    if not errors:
+        return None
+    return _warning(errors, f"after {blocks} retries")
 
 
 def decision(event: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
     agent_type = event.get("agent_type")
     if not isinstance(agent_type, str) or agent_type.split(":")[-1] != AGENT:
         return None
+    if event.get("hook_event_name") == "PreToolUse":
+        return handback_decision(event, environ)
+    path = state_path(event, environ)
+    if _state(path).get("delivered") is True:
+        path.unlink(missing_ok=True)
+        return None
     handed_back, last = transcript_reports(event.get("agent_transcript_path"))
     report = handed_back
     if report is None:
         message = event.get("last_assistant_message")
         report = message if isinstance(message, str) else last
-    path = state_path(event, environ)
     if not is_estimate(report):
         return None
     _, errors = check_report(report)
@@ -269,19 +334,14 @@ def decision(event: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, 
     blocks = _blocks_so_far(path)
     if handed_back is None and blocks < MAX_BLOCKS:
         _record(path, blocks + 1, errors, handed_back=False)
-        return {
-            "decision": "block",
-            "reason": "The harness-estimate block does not pass the check:\n"
-            + "\n".join(f"- {error}" for error in errors)
-            + "\nReply with the whole report again, ending with the corrected block: your last "
-            "message is what the team lead receives.",
-        }
+        retry = (
+            "Reply with the whole report again, ending with the corrected block: your last "
+            "message is what the team lead receives."
+        )
+        return {"decision": "block", "reason": _reason(errors, retry)}
     _record(path, blocks, errors, handed_back=handed_back is not None)
     why = "it was handed back already" if handed_back is not None else f"after {blocks} retries"
-    return {
-        "systemMessage": f"agent-harness: the estimator's harness-estimate block is invalid "
-        f"({why}): " + " ".join(errors)
-    }
+    return _warning(errors, why)
 
 
 def main(

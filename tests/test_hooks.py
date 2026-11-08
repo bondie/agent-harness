@@ -818,6 +818,21 @@ def test_a_missing_transcript_logs_nothing(tmp_path, event):
     assert log_run(tmp_path, event) == []
 
 
+@pytest.mark.parametrize("payload", ["not json", "[1, 2]"])
+def test_bad_input_lets_the_memory_write_through_and_logs_it(tmp_path, payload):
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(HOOKS / "guard_memory_writes.py")],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HARNESS_HOME": str(tmp_path)},
+        check=False,
+    )
+    assert (result.returncode, result.stdout) == (0, "")
+    assert "guard_memory_writes.py allowed the write after an internal error" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_bad_input_never_blocks_the_session(tmp_path):
     result = subprocess.run(  # noqa: S603
         [sys.executable, str(HOOKS / "log_agent_runs.py")],
@@ -970,6 +985,81 @@ def test_without_the_last_message_the_transcript_is_read(tmp_path):
 
     assert verdict is not None
     assert verdict["decision"] == "block"
+
+
+def estimator_handback(report: Any, tool: str = "SubagentHandback") -> dict[str, Any]:
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": "s1",
+        "agent_id": "a1",
+        "agent_type": "agent-harness:estimator",
+        "tool_name": tool,
+        "tool_input": {"message": report},
+    }
+
+
+def handback_denial(verdict: dict[str, Any] | None) -> str:
+    assert verdict is not None
+    output = verdict["hookSpecificOutput"]
+    assert (output["hookEventName"], output["permissionDecision"]) == ("PreToolUse", "deny")
+    return str(output["permissionDecisionReason"])
+
+
+def test_an_invalid_handback_is_denied(tmp_path):
+    reason = handback_denial(check_estimate(tmp_path, estimator_handback(estimate_report(total=3))))
+
+    assert "Set total to 2" in reason
+    assert "Call SubagentHandback again with the whole report" in reason
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        estimator_handback(estimate_report()),
+        estimator_handback(estimate_report(total=3), tool="Write"),
+        estimator_handback("Added to memory: nothing to estimate"),
+        estimator_handback(None),
+        {**estimator_handback(estimate_report(total=3)), "agent_type": "implementer"},
+    ],
+)
+def test_other_handbacks_go_through(tmp_path, event):
+    assert check_estimate(tmp_path, event) is None
+
+
+def test_handback_and_stop_share_the_count(tmp_path):
+    invalid = estimate_report(total=3)
+    handback_denial(check_estimate(tmp_path, estimator_handback(invalid)))
+
+    stopped = check_estimate(tmp_path, estimator_stop(tmp_path, invalid))
+    assert stopped is not None
+    assert stopped["decision"] == "block"
+    final = check_estimate(tmp_path, estimator_stop(tmp_path, invalid, stop_hook_active=True))
+    assert final is not None
+    assert "after 2 retries" in final["systemMessage"]
+
+
+def test_a_handback_let_through_after_two_denials_is_not_checked_at_stop(tmp_path):
+    invalid = estimate_report(total=3)
+    verdicts = [check_estimate(tmp_path, estimator_handback(invalid)) for _ in range(3)]
+
+    handback_denial(verdicts[0])
+    handback_denial(verdicts[1])
+    assert verdicts[2] is not None
+    assert "after 2 retries" in verdicts[2]["systemMessage"]
+    transcript = estimator_transcript(tmp_path, handback(invalid))
+    stop = estimator_stop(tmp_path, "Done.", agent_transcript_path=str(transcript))
+    assert check_estimate(tmp_path, stop) is None
+    assert not (tmp_path / "home" / "estimate-check" / "s1-a1.json").exists()
+    assert check_estimate(tmp_path, stop) is not None
+
+
+def test_a_valid_handback_is_not_checked_again_at_stop(tmp_path):
+    assert check_estimate(tmp_path, estimator_handback(estimate_report())) is None
+    record = json.loads((tmp_path / "home" / "estimate-check" / "s1-a1.json").read_text())
+    assert record == {"blocks": 0, "errors": [], "handed_back": True, "delivered": True}
+
+    assert check_estimate(tmp_path, estimator_stop(tmp_path, estimate_report(total=3))) is None
+    assert not (tmp_path / "home" / "estimate-check" / "s1-a1.json").exists()
 
 
 @pytest.mark.parametrize("payload", ["not json", "[1, 2]"])

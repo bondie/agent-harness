@@ -1,5 +1,5 @@
 {
-  "description": "Run the project's tests after the implementer edits a file and its quality gate when it finishes, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, keep every agent's memory lessons sourced, dated and under a size cap, deny subagents shell commands that destroy work, leak secrets or touch production, log every finished subagent run, keep each agent's report and structured block per ticket, and check the estimator's structured estimate and compute its total.",
+  "description": "Run the project's tests after the implementer edits a file and its quality gate when it finishes, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, keep every agent's memory lessons sourced, dated and under a size cap, deny subagents shell commands that destroy work, leak secrets or touch production, log every finished subagent run, keep each agent's report and structured block per ticket, and check the estimator's structured estimate and compute its total; the quality gate and the estimate check also run when a subagent hands its report back through SubagentHandback.",
   "hooks": {
     "PreToolUse": [
       {
@@ -28,6 +28,21 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_memory_writes.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "SubagentHandback",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/quality_gate.py\"",
+            "timeout": 600
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/estimate_check.py\"",
             "timeout": 10
           }
         ]
