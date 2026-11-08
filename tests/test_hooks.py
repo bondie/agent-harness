@@ -391,17 +391,22 @@ def test_the_main_session_keeps_its_normal_permission_prompt():
 
 
 def memory_guard(
-    tool: str, path: str, agent: str | None = "agent-harness:estimator", cwd: str = "/repo"
+    tool: str,
+    path: str,
+    agent: str | None = "agent-harness:estimator",
+    cwd: str = "/repo",
+    home: Path = HOOKS / "no-harness-home",
+    **tool_input: Any,
 ) -> dict[str, Any] | None:
     event: dict[str, Any] = {
         "hook_event_name": "PreToolUse",
         "tool_name": tool,
-        "tool_input": {"file_path": path},
+        "tool_input": {"file_path": path, **tool_input},
         "cwd": cwd,
     }
     if agent:
         event["agent_type"] = agent
-    result = hook("guard_memory_writes.py", event)
+    result = hook("guard_memory_writes.py", event, HARNESS_HOME=str(home))
     assert result.returncode == 0
     return json.loads(result.stdout) if result.stdout else None
 
@@ -454,6 +459,279 @@ def test_other_agents_and_the_main_session_are_not_limited(agent):
 
 def test_reading_stays_allowed():
     assert memory_guard("Read", "/repo/src/shop.py") is None
+
+
+VALID = "- Run the specs with make spec (source: SHOP-412, 2026-01-15)"
+LEGACY = "- An old note without a date"
+FORMAT = "`- <lesson text> (source: <KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])`"
+NO_TRAILER = "it does not end with (source: …, YYYY-MM-DD)"
+
+
+def memory_file(
+    tmp_path: Path, name: str = "MEMORY.md", content: str | None = None, agent: str = "implementer"
+) -> Path:
+    path = tmp_path / ".claude" / "agent-memory" / f"agent-harness-{agent}" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if content is not None:
+        path.write_text(content)
+    return path
+
+
+def write(path: Path, content: str, **options: Any) -> dict[str, Any] | None:
+    return memory_guard("Write", str(path), "agent-harness:implementer", content=content, **options)
+
+
+def change(path: Path, old: str, new: str, **options: Any) -> dict[str, Any] | None:
+    return memory_guard(
+        "Edit", str(path), "agent-harness:implementer", old_string=old, new_string=new, **options
+    )
+
+
+def denial(verdict: dict[str, Any] | None) -> str:
+    assert verdict is not None
+    assert verdict["hookSpecificOutput"]["permissionDecision"] == "deny"
+    return str(verdict["hookSpecificOutput"]["permissionDecisionReason"])
+
+
+def config(tmp_path: Path, text: str) -> Path:
+    home = tmp_path / "harness"
+    home.mkdir(exist_ok=True)
+    (home / "memory.json").write_text(text)
+    return home
+
+
+def lines_of(kb: float) -> str:
+    line = VALID + "\n"
+    return line * (int(kb * 1024) // len(line) + 1)
+
+
+@pytest.mark.parametrize("agent", ["implementer", "jira-analyst", "estimator", "reviewer-qa"])
+def test_every_agent_writes_lessons_in_the_format(tmp_path, agent):
+    path = memory_file(tmp_path, agent=agent)
+    verdict = memory_guard("Write", str(path), f"agent-harness:{agent}", content=f"{VALID}\n")
+    assert verdict is None
+
+
+@pytest.mark.parametrize("agent", ["implementer", "jira-analyst", "estimator", "reviewer-qa"])
+def test_every_agent_is_held_to_the_format(tmp_path, agent):
+    path = memory_file(tmp_path, agent=agent)
+    verdict = memory_guard("Write", str(path), f"agent-harness:{agent}", content=f"{LEGACY}\n")
+    assert f"line 1: {NO_TRAILER}" in denial(verdict)
+
+
+@pytest.mark.parametrize(
+    "lesson",
+    [
+        VALID,
+        "- Gone with the next release (source: !786, 2026-01-15, expires 2026-03-01)",
+        "- Learned from a commit (source: 5b4636d, 2026-01-15)",
+        "- Learned in a retro (source: retro, 2026-01-15)",
+        "- A lesson that wraps\n  onto a second line (source: SHOP-412, 2026-01-15)",
+        "- A headline (source: SHOP-412, 2026-01-15)\n  - with a detail below",
+        "* A star bullet (source: SHOP-412, 2026-01-15)",
+    ],
+)
+def test_lessons_in_the_format_pass(tmp_path, lesson):
+    assert write(memory_file(tmp_path, "topic.md"), f"# Notes\n\n{lesson}\n") is None
+
+
+@pytest.mark.parametrize(
+    ("lesson", "problem"),
+    [
+        (LEGACY, NO_TRAILER),
+        ("- Ends in prose (source: SHOP-412, 2026-01-15) and more", "it does not end with"),
+        ("+ A plus bullet", "it does not end with"),
+        ("- A date alone (2026-01-15)", "it has no source"),
+        ("- An empty source (source: , 2026-01-15)", "it has no source"),
+        ("- A month 13 (source: SHOP-412, 2026-13-01)", "2026-13-01 is not a date"),
+        (
+            "- Expires first (source: SHOP-412, 2026-01-15, expires 2026-01-01)",
+            "expires 2026-01-01 is not a date after 2026-01-15",
+        ),
+        (
+            "- Expires on a day 32 (source: SHOP-412, 2026-01-15, expires 2026-01-32)",
+            "expires 2026-01-32 is not a date after 2026-01-15",
+        ),
+    ],
+)
+def test_lessons_without_source_and_date_are_denied(tmp_path, lesson, problem):
+    reason = denial(write(memory_file(tmp_path, "topic.md"), f"# Notes\n\n{lesson}\n"))
+    assert f"- line 3: {problem}" in reason
+    assert f"`{lesson}`" in reason
+    assert FORMAT in reason
+
+
+def test_headings_front_matter_prose_and_code_are_not_lessons(tmp_path):
+    content = "\n".join(
+        [
+            "---",
+            "name: notes",
+            "- a front matter list item",
+            "---",
+            "# Notes",
+            "Plain prose is not a lesson.",
+            "  An indented line after prose neither.",
+            "```yaml",
+            "- not: a lesson",
+            "```",
+            VALID,
+        ]
+    )
+    assert write(memory_file(tmp_path, "topic.md"), content) is None
+
+
+def test_index_links_in_memory_md_need_no_source(tmp_path):
+    link = "- [Commands](commands.md) — how to run the tests"
+    assert write(memory_file(tmp_path), f"# Index\n\n{link}\n") is None
+    assert "line 1: it does not end with" in denial(write(memory_file(tmp_path, "t.md"), link))
+    url = "- [Docs](https://example.com/docs.md) — the manual"
+    assert "line 1: it does not end with" in denial(write(memory_file(tmp_path), url))
+
+
+def test_lines_already_in_the_file_are_not_checked(tmp_path):
+    path = memory_file(tmp_path, "topic.md", f"{LEGACY}\n- Another old note\n")
+
+    assert write(path, f"- Another old note\n{LEGACY}\n{VALID}\n") is None
+    assert change(path, f"{LEGACY}\n", f"{LEGACY}\n{VALID}\n") is None
+    assert change(path, "- Another old note\n", "") is None
+
+
+def test_a_changed_line_needs_the_format(tmp_path):
+    path = memory_file(tmp_path, "topic.md", f"# Notes\n{LEGACY}\n")
+    changed = f"{LEGACY}, changed"
+
+    assert f"line 2: {NO_TRAILER}: `{changed}`" in denial(write(path, f"# Notes\n{changed}\n"))
+    assert f"line 1 of new_string: {NO_TRAILER}: `{changed}`" in (
+        denial(change(path, LEGACY, changed))
+    )
+    assert change(path, LEGACY, f"{LEGACY} (source: SHOP-412, 2026-01-15)") is None
+
+
+def test_an_edit_checks_only_the_lines_its_new_string_adds(tmp_path):
+    path = memory_file(tmp_path, "topic.md", f"{LEGACY}\n- Another old note\n")
+
+    reason = denial(change(path, "- Another old note", "- Another old note\n- A new note"))
+
+    assert f"- line 2 of new_string: {NO_TRAILER}: `- A new note`" in reason
+    assert LEGACY not in reason
+    assert "Another old note" not in reason
+
+
+def test_a_multi_edit_checks_every_edit(tmp_path):
+    path = memory_file(tmp_path, "topic.md", f"{LEGACY}\n")
+    edits = [
+        {"old_string": LEGACY, "new_string": f"{LEGACY}\n{VALID}"},
+        {"old_string": VALID, "new_string": f"{VALID}\n- Undated"},
+    ]
+
+    agent = "agent-harness:implementer"
+
+    reason = denial(memory_guard("MultiEdit", str(path), agent, edits=edits))
+
+    assert f"line 2 of new_string: {NO_TRAILER}: `- Undated`" in reason
+    assert memory_guard("MultiEdit", str(path), agent, edits=edits[:1]) is None
+    assert memory_guard("MultiEdit", str(path), agent, edits="x") is None
+
+
+def test_the_reason_names_at_most_five_lines(tmp_path):
+    content = "\n".join(f"- Note {number}" for number in range(8))
+
+    reason = denial(write(memory_file(tmp_path, "topic.md"), content))
+
+    assert "`- Note 4`" in reason
+    assert "`- Note 5`" not in reason
+    assert "- and 3 more" in reason
+
+
+def test_the_source_can_be_made_optional(tmp_path):
+    home = config(tmp_path, json.dumps({"require_source": False}))
+    path = memory_file(tmp_path, "topic.md")
+
+    assert write(path, "- A date alone (2026-01-15)\n", home=home) is None
+    assert "it does not end with" in denial(write(path, f"{LEGACY}\n", home=home))
+
+
+@pytest.mark.parametrize(("name", "cap"), [("MEMORY.md", 4), ("topic.md", 8)])
+def test_a_file_over_its_cap_is_denied(tmp_path, name, cap):
+    path = memory_file(tmp_path, name)
+    assert write(path, lines_of(cap - 0.5)) is None
+
+    reason = denial(write(path, lines_of(cap + 0.5)))
+
+    assert f"over the {cap} KB cap" in reason
+    assert "compact or move detail to a topic file" in reason
+
+
+def test_a_write_that_shrinks_an_oversized_file_is_allowed(tmp_path):
+    path = memory_file(tmp_path, content="# Index\n" + lines_of(10))
+
+    assert write(path, lines_of(6)) is None
+    assert change(path, "# Index\n", "") is None
+    assert "over the 4 KB cap for the memory index" in denial(
+        change(path, "# Index\n", f"# Index\n{VALID}\n")
+    )
+
+
+def test_an_edit_the_tool_cannot_apply_is_left_to_the_tool(tmp_path):
+    path = memory_file(tmp_path, content=lines_of(10))
+    assert change(path, "- Not in the file", f"{VALID}\n") is None
+    assert change(memory_file(tmp_path, "missing.md"), "", f"{VALID}\n") is None
+
+
+def test_caps_come_from_memory_json(tmp_path):
+    home = config(tmp_path, json.dumps({"max_file_kb": 1, "max_index_kb": 12.5}))
+
+    assert write(memory_file(tmp_path), lines_of(12), home=home) is None
+    assert "over the 1 KB cap for a memory file" in denial(
+        write(memory_file(tmp_path, "topic.md"), lines_of(2), home=home)
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        '{"max_index_kb": NaN, "require_source": "no"}',
+        '{"max_index_kb": Infinity, "require_source": null}',
+        '{"max_index_kb": -1}',
+        '{"max_index_kb": 0}',
+        '{"max_index_kb": "12"}',
+        '{"max_index_kb": true}',
+        '{"max_index_kb": null}',
+        "[12]",
+        "not json",
+    ],
+)
+def test_unusable_settings_fall_back_to_the_defaults(tmp_path, settings):
+    home = config(tmp_path, settings)
+    path = memory_file(tmp_path)
+
+    assert "over the 4 KB cap" in denial(write(path, lines_of(5), home=home))
+    assert "it has no source" in denial(write(path, "- A date alone (2026-01-15)\n", home=home))
+
+
+@pytest.mark.parametrize(
+    ("agent", "target"),
+    [
+        (None, "agent-harness-implementer/MEMORY.md"),
+        ("general-purpose", "agent-harness-implementer/MEMORY.md"),
+        ("agent-harness:implementer", "agent-harness-estimator/MEMORY.md"),
+    ],
+)
+def test_only_the_agents_own_memory_is_checked(tmp_path, agent, target):
+    path = tmp_path / ".claude" / "agent-memory" / target
+    assert memory_guard("Write", str(path), agent, content=f"{LEGACY}\n") is None
+
+
+def test_the_implementer_writes_other_files_unchecked(tmp_path):
+    assert write(tmp_path / "README.md", f"{LEGACY}\n") is None
+
+
+def test_a_relative_path_into_memory_is_checked(tmp_path):
+    path = memory_file(tmp_path, "topic.md")
+    verdict = memory_guard(
+        "Write", "topic.md", "agent-harness:implementer", cwd=str(path.parent), content=LEGACY
+    )
+    assert "it does not end with" in denial(verdict)
 
 
 def transcript(tmp_path: Path) -> Path:

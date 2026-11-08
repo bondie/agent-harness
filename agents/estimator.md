@@ -94,6 +94,11 @@ Your memory directory is loaded into this prompt at the start of every run. Keep
 - **Corrections:** when a person rejects an estimate, what they said and what the revised
   estimate was, in one line each. Read them before you price the next plan.
 
+Write each note as one bullet that ends with its source and date: `- <note> (source:
+<KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])`; a hook denies a new bullet without
+them and a file over its size cap. Never record a path in a temporary directory (a scratchpad,
+`/tmp`): it is gone by the next run, so record how to rebuild what was there.
+
 Never store the estimate or logged time of the ticket you are estimating. Write nowhere else:
 a hook denies writes outside your memory directory.
 
