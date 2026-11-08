@@ -113,8 +113,10 @@ Then, per project:
 `hooks/save_artifacts.py` keeps what it produced in `~/.claude/agent-harness/tickets/<KEY>/`
 (`HARNESS_HOME` moves the root). The key is `HARNESS_TICKET`, else the `ticket` of the
 report's structured block, else the first ticket key in the agent's task that is not a
-standard such as `UTF-8` or `ISO-8601`, otherwise `adhoc-<YYYYMMDD>-<agent id>`. A retro run
-(task starting "Retro for") is not saved, gated or estimate-checked.
+standard such as `UTF-8` or `ISO-8601`, otherwise `adhoc-<YYYYMMDD>-<agent id>`. A project
+whose tracker key prefix is one of those standards (`ISO`, `RFC`, `CVE`, `UTC`, … in
+`NOT_TICKET_PREFIXES`) must set `HARNESS_TICKET`. A retro run (task starting "Retro for",
+optionally after `<KEY>:`) is not saved, gated or estimate-checked.
 
 | File | Content |
 |---|---|
@@ -164,10 +166,12 @@ end-to-end run of the handback path, because auto mode cannot be scripted with `
 - `HARNESS_GATE_COMMANDS` in the `env` of the settings, as JSON (the same object or only its
   command list), wins over the file, so a person can override the team's checks in
   `.claude/settings.local.json`.
-- Only the session's repository is trusted to configure commands. Another repository uses its
-  own settings and file only when the session's `gate.repositories` lists it (paths relative
-  to the session's repository); changed files anywhere else are skipped, with a note in
-  `gates.json` and to the person.
+- Trusted to configure commands are the session's repository, its git worktrees and the
+  repositories under the session's folder. Another repository uses its own settings and file
+  only when the session's `gate.repositories` lists it (paths relative to the session's
+  repository); changed files anywhere else are skipped, with a note in `gates.json` and to
+  the person, also when no check ran. An entry that names no usable path is ignored with a
+  note.
 - Without a configuration the gate does nothing. When it cannot write under `HARNESS_HOME`,
   it runs nothing and tells the person.
 
@@ -506,9 +510,12 @@ uv run harness-eval metrics --repo ../shop ../platform          # or --json
   `review.json` is the last, `review.01.json`, `review.02.json`, … the earlier ones. Ids are
   matched within one round; give `--round N` (1 first) when the id is in several.
 - **`escaped --commit SHA --repo PATH`** finds the ticket key in the commit message, else in
-  the first merge commit that brought the commit in (a merge request's merge commit carries
-  its branch name and title): a merge whose second parent has the commit and whose first
-  parent does not, so a commit made on the target branch is never blamed on a later merge.
+  the merge commit that brought the commit in (a merge request's merge commit carries its
+  branch name and title). It looks at the branches no other branch contains, each along its
+  first-parent chain: a commit made on such a branch directly (a hotfix) has no key, and a
+  merge that synced the target branch into a feature branch does not count once the target
+  branch has moved on. Until it has, a hotfix synced into a feature branch can still be
+  blamed on that branch.
   Names of standards (`UTF-8`, `PSR-12`, `SHA-256`, …) are not keys. Of several keys it takes
   the one that already has a ticket directory; when that leaves more than one, or none names
   a ticket, it lists them and asks for `--ticket KEY`. It appends the defect to

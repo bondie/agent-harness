@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """SubagentStop hook: run the repository's checks on the files the implementer changed.
 
-The checks are `gate` in the repository's `.claude/agent-harness.json`:
-`{"commands": [{"cmd": "ruff check {files}", "match": "\\.py$"}], "timeout": 300,
-"max_blocks": 2}`. HARNESS_GATE_COMMANDS in the env (that object or just its command list, as
-JSON) wins over the file: the session's env for the session's repository, the env of its
+The checks are `gate` in the repository's `.claude/agent-harness.json`: `{"commands": [{"cmd":
+"ruff check {files}", "match": "\\.py$"}], "timeout": 300, "max_blocks": 2}`.
+HARNESS_GATE_COMMANDS in the env (that object or just its command list, as JSON) wins over the
+file: the session's env for the session's repository, the env of its
 `.claude/settings.local.json` or `.claude/settings.json` for another one. Only the session's
-repository and the repositories listed in its `gate.repositories` are trusted to configure
-commands; changed files in any other repository are skipped with a note. Without a
-configuration the hook does nothing. The changed files are those in the implementer's
-`harness-implementation` block, else the uncommitted files of the repository it worked in.
-Each command runs through the POSIX shell in its repository's root with `{files}` replaced by
-the changed files matching `match`, already quoted and relative to that root; a command with
-no matching file is skipped. The result goes to `gates.json` in the ticket's artifacts
-directory. A failure blocks the implementer from finishing and hands it the output, at most
-`max_blocks` times in a row; after that it may finish and the gate stays failed until the
-next run of the agent. A retro run (task starting "Retro for") is not checked. Standard
-library only, and it never fails the session.
+repository, its worktrees, the repositories under the session's folder and the ones listed in
+its `gate.repositories` are trusted to configure commands; changed files in any other
+repository are skipped with a note. Without a configuration the hook does nothing. The changed
+files are those in the implementer's `harness-implementation` block, else the uncommitted
+files of the repository it worked in. Each command runs through the POSIX shell in its
+repository's root with `{files}` replaced by the changed files matching `match`, already
+quoted and relative to that root; a command with no matching file is skipped. The result goes
+to `gates.json` in the ticket's artifacts directory. A failure blocks the implementer from
+finishing and hands it the output, at most `max_blocks` times in a row; after that it may
+finish and the gate stays failed until the next run of the agent. A retro run (task starting
+"Retro for") is not checked. Standard library only, and it never fails the session.
 
 In auto mode the implementer delivers its report through SubagentHandback before it stops, so
 a SubagentStop block comes too late. The same script runs as a PreToolUse hook on that tool:
@@ -45,7 +45,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any, TextIO
 
-from run_tests import is_implementer, repository_env
+from run_tests import is_implementer, is_session_repository, repository_env
 from save_artifacts import (
     HANDBACK,
     agent_transcript,
@@ -168,8 +168,9 @@ def listed_repositories(gate: Any) -> list[Any]:
     return names if isinstance(names, list) else []
 
 
-def trusted_repositories(session: Path, environ: Mapping[str, str]) -> set[Path]:
-    """The session's repository and the ones its configuration lists in `repositories`."""
+def other_repositories(session: Path, environ: Mapping[str, str]) -> tuple[set[Path], list[str]]:
+    """The repositories the session's configuration lists in `repositories`, and the entries
+    that name no usable path."""
     try:
         config = json.loads((session / CONFIG).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
@@ -180,19 +181,56 @@ def trusted_repositories(session: Path, environ: Mapping[str, str]) -> set[Path]
         env = {}
     file = config.get("gate") if isinstance(config, dict) else None
     names = listed_repositories(file) + listed_repositories(env)
-    trusted = {session}
+    listed: set[Path] = set()
+    ignored: list[str] = []
     for name in names:
         if not isinstance(name, str) or not name.strip():
             continue
-        path = (session / Path(name).expanduser()).resolve()
-        trusted.add(toplevel(path) or path)
-    return trusted
+        try:
+            path = (session / Path(name).expanduser()).resolve()
+        except (RuntimeError, OSError) as error:
+            ignored.append(f"the gate.repositories entry {name} ({error})")
+            continue
+        listed.add(toplevel(path) or path)
+    return listed, ignored
 
 
-def repository_gate(repo: Path, session: Path, environ: Mapping[str, str]) -> Gate | None:
-    if repo == session:
-        return env_gate(environ) or file_gate(repo)
-    return env_gate(repository_env(repo)) or file_gate(repo)
+@cache
+def common_dir(repo: Path) -> Path | None:
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), "rev-parse", "--git-common-dir"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return (repo / result.stdout.strip()).resolve()
+
+
+def shares_git_dir(repo: Path, session: Path | None) -> bool:
+    if session is None:
+        return False
+    shared = common_dir(repo)
+    return shared is not None and shared == common_dir(session)
+
+
+def repository_gate(
+    repo: Path, project: Path, listed: set[Path], environ: Mapping[str, str]
+) -> tuple[bool, Gate | None]:
+    """Whether the repository is trusted to configure checks, and its gate.
+
+    Trusted are the session's repository, its worktrees, the repositories under the session's
+    folder and the ones the session's configuration lists."""
+    if is_session_repository(project, repo) or shares_git_dir(repo, toplevel(project)):
+        return True, env_gate(environ) or file_gate(repo)
+    if repo in listed:
+        return True, env_gate(repository_env(repo)) or file_gate(repo)
+    return False, None
 
 
 @cache
@@ -242,7 +280,10 @@ def listed(names: list[Any], cwd: Path, root: Path | None) -> list[Path]:
     for name in names:
         if not isinstance(name, str) or not name.strip():
             continue
-        path = Path(name).expanduser()
+        try:
+            path = Path(name).expanduser()
+        except RuntimeError:
+            continue
         if path.is_absolute():
             paths.append(path)
             continue
@@ -404,7 +445,8 @@ def skipped_note(skipped: dict[Path, list[str]]) -> str:
     where = "; ".join(f"{', '.join(files)} in {repo}" for repo, files in skipped.items())
     return (
         f"The quality gate did not check {where}: it runs only the checks of the session's "
-        "repository and of the repositories listed in its gate.repositories."
+        "repository, its worktrees, the repositories under the session's folder and the ones "
+        "listed in its gate.repositories."
     )
 
 
@@ -459,25 +501,29 @@ def gate(event: dict[str, Any], environ: Mapping[str, str], stdout: TextIO) -> N
     root = toplevel(cwd.resolve())
     changed = changed_files(cwd, root, report)
     project = Path(environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or ".").resolve()
-    session = toplevel(project) or project
-    trusted = trusted_repositories(session, environ)
+    listed, ignored = other_repositories(toplevel(project) or project, environ)
     repos = list(dict.fromkeys(repo for repo in (root, *changed) if repo is not None))
-    gates = {
-        repo: found
-        for repo in repos
-        if repo in trusted and (found := repository_gate(repo, session, environ))
-    }
-    if not gates:
+    gates: dict[Path, Gate] = {}
+    skipped: dict[Path, list[str]] = {}
+    for repo in repos:
+        trusted, found = repository_gate(repo, project, listed, environ)
+        if found:
+            gates[repo] = found
+        if not trusted and changed.get(repo):
+            skipped[repo] = changed[repo]
+    notes = [skipped_note(skipped)] if skipped else []
+    notes += [f"The quality gate ignored {entry}."] if (entry := ", ".join(ignored)) else []
+    note = " ".join(notes)
+    if not gates and not note:
         return
-    skipped = {repo: files for repo, files in changed.items() if repo not in trusted}
     problem = unwritable(directory)
     if problem:
         message = f"agent-harness did not run the quality gate, {problem}. Check HARNESS_HOME."
-        json.dump({"systemMessage": message}, stdout)
+        json.dump({"systemMessage": " ".join([message, *notes])}, stdout)
         return
     commands = run_gates(gates, changed)
     passed = all(command["exit"] == 0 for command in commands)
-    limit = min(found.max_blocks for found in gates.values())
+    limit = min((found.max_blocks for found in gates.values()), default=DEFAULT_MAX_BLOCKS)
     if at_handback:
         limit = min(limit, HANDBACK_RETRIES)
     with locked(directory):
@@ -496,8 +542,9 @@ def gate(event: dict[str, Any], environ: Mapping[str, str], stdout: TextIO) -> N
         result |= {"blocks": blocks, "commands": commands}
         if skipped:
             result["skipped"] = [{"repo": str(r), "files": f} for r, f in skipped.items()]
+        if notes:
+            result["notes"] = notes
         write_json(directory / "gates.json", result)
-    note = skipped_note(skipped) if skipped else ""
     if blocks > used:
         reason = block_reason(commands, blocks, limit, at_handback)
         reason += f"\n\n{note}" if note else ""
