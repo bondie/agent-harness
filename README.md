@@ -21,12 +21,13 @@ history; only aggregate numbers are published.
 
 **Backtest on 1,212 finished tickets from 2026** (private history, logged hours as ground
 truth, no future data in reach): the estimator 0.6 ships, which returns a structured block
-and lets code compute the number, shows no measurable difference from the plain median of
-similar recent tickets (MAE 1.37 h vs 1.33 h, p = 0.30, Claude Sonnet on a 150-ticket
-sample). It gives one number, so its range was not measured; in that run the model also chose
-the median it started from, which 0.6 no longer allows (a rerun is pending, see
-[Does it work?](#does-it-work)). The earlier answer format tied the median the same way (1.36 h
-vs 1.34 h, p = 0.78) and its P25–P75 range held the actual time 52% of the time. Without
+and lets code compute the number from the retrieved median and cited adjustments, shows no
+measurable difference from the plain median of similar recent tickets (MAE 1.38 h vs 1.33 h,
+p = 0.23, Claude Sonnet on a 150-ticket sample). It keeps the median on 53% of tickets and
+never leaves it without a citation, but its cited moves do not make it more accurate. It
+gives one number, so its range was not measured. The earlier answer format tied the median
+the same way (1.36 h vs 1.34 h, p = 0.78) and its P25–P75 range held the actual time 52% of
+the time. Without
 similar tickets, Claude Sonnet is worse than random guessing and a local 12B model is far
 worse; with them, the local model matches Claude. The biggest gain came from neither model:
 limiting the reference class to tickets after a process change cut the error by 29%.
@@ -417,17 +418,17 @@ What the numbers say:
   accuracy.** The rule says to keep the median unless a difference can be named, yet both
   models moved away from it on 93–95% of tickets (71% once both are rounded to half an hour)
   and ended up overestimating slightly more than the median itself (+0.25 to +0.50 h vs
-  +0.31 h). With the number computed by code from the median and cited adjustments, Claude
-  kept the median on 41% of tickets instead of 30% and cited a neighbour for every
-  adjustment, with no measurable difference in accuracy (MAE 1.37 h vs 1.34 h for the
-  earlier format, p = 0.51; 1.33 h for the recent median, p = 0.30). Caveat: in that run
-  the model wrote the median itself, and at least 22 of 150 estimates moved off the
-  retrieved median without a cited adjustment. The published MAE uses the model's median;
-  the evaluation now starts from the retrieved one and reports this "median drift", and a
-  rerun is pending. That run also predates the memory paragraph in `agents/estimator.md`.
-  The recent median scores 1.33 h there and 1.34 h above because the ticket index was
-  refreshed between the runs and one ticket's reference class changed
-  ([section 4](results/2026-backtest.md)).
+  +0.31 h). With the number computed by code from the retrieved median and cited
+  adjustments (0.6), Claude kept the median on 53% of tickets instead of 30%, never wrote a
+  median other than the retrieved one (0 of 150) and needed no retry, with no measurable
+  difference in accuracy (MAE 1.38 h vs 1.33 h for the recent median, p = 0.23; 1.34 h for
+  the earlier format, p = 0.40). The moves it still makes go mostly up (54 up, 16 down) and
+  do not pay off. A first run that let the model write the median itself kept it on 41%,
+  with at least 22 of 150 estimates off the retrieved median without a citation, and scored
+  the same (1.37 h). The recent median scores 1.33 h there and 1.34 h above because the
+  ticket index was refreshed between the runs and one ticket's reference class changed
+  ([section 4](results/2026-backtest.md)). The rerun of both structured variants cost 4.67 USD for
+  300 estimates.
 - **Keyword and hybrid retrieval tie here** (1.58 h vs 1.60 h for Claude). The tickets of one
   team share vocabulary, so BM25 finds the same neighbours.
 
