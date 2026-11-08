@@ -1,5 +1,5 @@
 {
-  "description": "Run the project's tests after the implementer edits a file, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, and log every finished subagent run.",
+  "description": "Run the project's tests after the implementer edits a file, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, deny subagents shell commands that destroy work, leak secrets or touch production, and log every finished subagent run.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,16 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_tracker_writes.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_shell.py\"",
             "timeout": 10
           }
         ]

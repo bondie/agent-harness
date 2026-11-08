@@ -1,0 +1,16 @@
+{
+  "guard": {
+    "scope": "subagents",
+    "allow_force_with_lease": "main",
+    "secret_globs": ["deploy/ci-secrets.yml", "config/*.secret.yaml"],
+    "allowed_rm_dirs": ["var/cache", "node_modules"],
+    "prod_db_hosts": ["^prod-db\\.", "\\.prod\\.example\\.com$"],
+    "safe_filters": ["^grep -v -i -E \\S*(token|password|secret)\\S*$"],
+    "extra_deny": [
+      {
+        "pattern": "\\bterraform\\s+(apply|destroy)\\b",
+        "reason": "Terraform changes real infrastructure"
+      }
+    ]
+  }
+}

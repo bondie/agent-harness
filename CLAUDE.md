@@ -1,6 +1,6 @@
 # agent-harness
 
-A Claude Code plugin (four subagents, a `ticket` skill, two hooks, an MCP server entry) and the
+A Claude Code plugin (four subagents, a `ticket` skill, five hooks, an MCP server entry) and the
 Python package that backtests its estimator.
 
 ## Layout
