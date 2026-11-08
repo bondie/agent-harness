@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -105,3 +106,40 @@ def store(tmp_path: Path) -> Iterator[Store]:
 @pytest.fixture
 def searcher(store: Store) -> Searcher:
     return Searcher(store, FakeEmbedder())
+
+
+class GitRepo:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.mkdir(parents=True, exist_ok=True)
+        self.git("init", "-q", "-b", "main")
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(  # noqa: S603
+            ["git", "-C", str(self.path), *args],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    def commit(self, message: str, files: dict[str, str] | None = None) -> str:
+        for name, content in (files or {}).items():
+            target = self.path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD").strip()
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GitRepo:
+    """A repository whose git ignores the user's global configuration (signing, hooks)."""
+    empty = tmp_path / "gitconfig"
+    empty.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "Dev")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "dev@example.com")
+    return GitRepo(tmp_path / "repo")
