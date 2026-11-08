@@ -531,6 +531,18 @@ uv run harness-eval metrics --repo ../shop ../platform          # or --json
   the choice of few-shot examples matters ([Tawosi et al., SSBSE 2023](https://arxiv.org/abs/2403.08430)).
   Existing Claude Code estimator agents (e.g. [ninja-agents `jira-story-points`](https://github.com/ninja-agents/ninja-agents/blob/main/.claude/agents/jira-story-points.md))
   are not evaluated.
+- **Learning loops and phased workflows:** [EveryInc compound-engineering-plugin](https://github.com/EveryInc/compound-engineering-plugin)
+  loops plan → work → review → compound: `/ce-compound` writes what a session learned to
+  `docs/solutions/`, and later planning and review search those notes for the ones relevant to
+  the change. Its lessons are write-ups of what a session concluded; agent-harness learns from
+  logged facts (worklog hours against the estimate, review dispositions, gate results),
+  approved line by line in a retro. [obra/superpowers](https://github.com/obra/superpowers)
+  has a `verification-before-completion` skill and tests skills by running subagents on
+  pressure scenarios with and without them. HumanLayer's research → plan → implement
+  ([advanced context engineering](https://github.com/humanlayer/advanced-context-engineering-for-coding-agents))
+  writes an artifact per phase and clears the context between phases, as the ticket artifacts
+  here carry the analysis and the estimate to the next agent. Sharing memory across a team is
+  discussed in [docs/shared-memory.md](docs/shared-memory.md).
 
 What this repository adds: hours from private worklogs (no training-data contamination),
 prediction ranges with measured coverage, a temporal cut-off inside the retrieval tool, a
