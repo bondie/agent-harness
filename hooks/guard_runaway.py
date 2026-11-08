@@ -11,7 +11,7 @@ the agent types in `exclude_agents` (by full type or the part after the last `:`
 - failure_streak: after `failure_streak` failed calls in a row (interrupts do not count, a
   success resets), the next call is denied once, unless it reports or asks. A Bash exit 1 of a
   command whose 1 means no match, a difference or false (grep, diff, test, …), as the whole
-  call or its last pipeline stage, is not counted.
+  call or its last pipeline stage, after any `cd … &&`, is not counted.
 - long_run: once per agent, `warn_minutes` after its first call, the next tool result carries
   a reminder to report before work that takes more than about 10 more minutes.
 Settings: `runaway` in `$HARNESS_HOME/guard.json`, then in the `guard` key of the project's
@@ -51,6 +51,8 @@ UNCOUNTED = REPORTS | {"Agent", "Task", "TaskOutput", "BashOutput", "Monitor", "
 WAIT = re.compile(r"\b(?:sleep|wait)\b")
 SPACES = re.compile(r"[ \t]+")
 NO_MATCH = {"grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "[", "[["}
+# Matched only as typed: `./test` or `bin/test` is a project script, not the builtin.
+BUILTIN_TESTS = {"test", "[", "[["}
 GIT_DIFF_EXIT = {"--exit-code", "--quiet", "--no-index"}
 UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 KEEP_SECONDS = 2 * 24 * 3600
@@ -270,14 +272,27 @@ def answered_no(event: dict[str, Any]) -> bool:
     if lexer.unclosed or not items or not all(isinstance(item, Command) for item in items):
         return False
     stages = [item for item in items if isinstance(item, Command)]
+    while len(stages) > 1 and stages[0].after == "&&" and changes_dir(stages[0].words):
+        stages = stages[1:]
     if any(stage.after not in PIPES for stage in stages[:-1]):
         return False
-    call = unwrap(stages[-1].words)
+    words = stages[-1].words
+    call = unwrap(words)
     if call is None or call.via_xargs:
         return False
+    typed = words[len(words) - len(call.args) - 1]
+    if call.program in BUILTIN_TESTS:
+        return typed == call.program
     if call.program in NO_MATCH:
         return True
     return call.program == "git" and git_answers_no(call.args)
+
+
+def changes_dir(words: list[str]) -> bool:
+    from guard_shell import unwrap
+
+    call = unwrap(words)
+    return call is not None and call.program in ("cd", "pushd")
 
 
 def git_answers_no(args: list[str]) -> bool:

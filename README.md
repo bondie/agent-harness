@@ -342,8 +342,10 @@ session started with `--agent` is left alone too.
 - A Bash command that exits with a non-zero code is a failed call. Exit code 1 of `grep`,
   `egrep`, `fgrep`, `rg`, `ag`, `diff`, `cmp`, `test`, `[`, `[[`, `git grep` or
   `git diff --exit-code` (also `--quiet`, `--no-index`) means no match, a difference or false:
-  when that command is the whole call or its last pipeline stage, the exit neither counts nor
-  resets the streak. In a chain (`cd src && grep …`) or under `xargs` it counts.
+  when that command is the whole call or its last pipeline stage, also after leading
+  `cd …`/`pushd … &&` steps (`cd /work/shop && grep …`), the exit neither counts nor resets the
+  streak. After `;`, `||` or another `&&` step, in a subshell or under `xargs` it counts, and so
+  does a script named like a builtin (`./test`, `bin/test`).
 
 The settings are the `runaway` object in `~/.claude/agent-harness/guard.json` (under
 `$HARNESS_HOME` when set), then in the `guard` key of the project's
