@@ -7,8 +7,10 @@ or the sum of the parts, plus the adjustments, rounded to half an hour and never
 hour. A block that is missing or breaks a rule (an adjustment without a citation, a part
 without evidence, a total that differs from the computed one) keeps the estimator running
 with the errors as its next instruction, at most twice per run; after that the hook lets it
-stop and warns the person. Reports without an "Estimate:" line (a retro, a recorded
-correction) are not checked.
+stop and warns the person, and the count starts over only when the agent runs again. Reports
+without an "Estimate:" line (a recorded correction) and retro runs (task starting "Retro for")
+are not checked. When the hook cannot record its count, it lets the report through and says
+so.
 
 In auto mode the estimator delivers its report through SubagentHandback before it stops, so
 the same check runs as a PreToolUse hook on that tool and denies the call; the two paths share
@@ -32,6 +34,7 @@ from typing import Any, TextIO
 
 AGENT = "estimator"
 HANDBACK = "SubagentHandback"
+RETRO = "retro for"
 MAX_BLOCKS = 2
 MODES = ("bottom-up", "reference")
 KINDS = ("implementation", "verification", "release")
@@ -233,6 +236,35 @@ def transcript_reports(path: object) -> tuple[str | None, str]:
     return handed_back, last
 
 
+def _agent_transcript(event: Mapping[str, Any]) -> str | None:
+    path = event.get("agent_transcript_path")
+    if isinstance(path, str) and path:
+        return path
+    session, agent_id = event.get("transcript_path"), event.get("agent_id")
+    if not isinstance(session, str) or not session or not isinstance(agent_id, str) or not agent_id:
+        return None
+    return str(Path(session).with_suffix("") / "subagents" / f"agent-{agent_id}.jsonl")
+
+
+def is_retro(event: Mapping[str, Any]) -> bool:
+    """The run's task, its first user message, starts with "Retro for"."""
+    path = _agent_transcript(event)
+    if path is None or not Path(path).is_file():
+        return False
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "user" or entry.get("isMeta"):
+            continue
+        message = entry.get("message")
+        task = _text(message.get("content") if isinstance(message, dict) else None)
+        if task.strip():
+            return task.lstrip().lower().startswith(RETRO)
+    return False
+
+
 def state_path(event: Mapping[str, Any], environ: Mapping[str, str]) -> Path:
     home = environ.get("HARNESS_HOME") or str(Path.home() / ".claude" / "agent-harness")
     run = f"{event.get('session_id') or 'session'}-{event.get('agent_id') or 'agent'}"
@@ -255,13 +287,28 @@ def _blocks_so_far(path: Path) -> int:
 
 
 def _record(
-    path: Path, blocks: int, errors: list[str], handed_back: bool, delivered: bool = False
+    path: Path,
+    blocks: int,
+    errors: list[str],
+    handed_back: bool,
+    delivered: bool = False,
+    denied: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"blocks": blocks, "errors": errors, "handed_back": handed_back}
+    record: dict[str, Any] = {"blocks": blocks, "errors": errors, "handed_back": handed_back}
     if delivered:
         record["delivered"] = True
+    if denied:
+        record["denied_at_handback"] = True
     path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _unrecorded(path: Path, error: OSError, errors: list[str]) -> dict[str, Any]:
+    why = f"{path.parent} is not writable ({error.strerror or error})"
+    message = f"agent-harness could not run the estimate check, {why}. Check HARNESS_HOME."
+    if errors:
+        message += " The harness-estimate block is invalid: " + " ".join(errors)
+    return {"systemMessage": message}
 
 
 def _reason(errors: list[str], retry: str) -> str:
@@ -292,8 +339,15 @@ def handback_decision(
     path = state_path(event, environ)
     _, errors = check_report(report)
     blocks = _blocks_so_far(path)
-    if errors and blocks < MAX_BLOCKS:
-        _record(path, blocks + 1, errors, handed_back=False)
+    denied = bool(errors) and blocks < MAX_BLOCKS
+    try:
+        if denied:
+            _record(path, blocks + 1, errors, handed_back=False, denied=True)
+        if not denied:
+            _record(path, blocks, errors, handed_back=True, delivered=True)
+    except OSError as error:
+        return _unrecorded(path, error, errors)
+    if denied:
         retry = (
             "Call SubagentHandback again with the whole report, ending with the corrected block."
         )
@@ -304,7 +358,6 @@ def handback_decision(
                 "permissionDecisionReason": _reason(errors, retry),
             }
         }
-    _record(path, blocks, errors, handed_back=True, delivered=True)
     if not errors:
         return None
     return _warning(errors, f"after {blocks} retries")
@@ -313,6 +366,8 @@ def handback_decision(
 def decision(event: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
     agent_type = event.get("agent_type")
     if not isinstance(agent_type, str) or agent_type.split(":")[-1] != AGENT:
+        return None
+    if is_retro(event):
         return None
     if event.get("hook_event_name") == "PreToolUse":
         return handback_decision(event, environ)
@@ -332,14 +387,19 @@ def decision(event: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, 
         path.unlink(missing_ok=True)
         return None
     blocks = _blocks_so_far(path)
-    if handed_back is None and blocks < MAX_BLOCKS:
-        _record(path, blocks + 1, errors, handed_back=False)
+    if event.get("stop_hook_active") is False and not _state(path).get("denied_at_handback"):
+        blocks = 0
+    again = handed_back is None and blocks < MAX_BLOCKS
+    try:
+        _record(path, blocks + 1 if again else blocks, errors, handed_back=handed_back is not None)
+    except OSError as error:
+        return _unrecorded(path, error, errors)
+    if again:
         retry = (
             "Reply with the whole report again, ending with the corrected block: your last "
             "message is what the team lead receives."
         )
         return {"decision": "block", "reason": _reason(errors, retry)}
-    _record(path, blocks, errors, handed_back=handed_back is not None)
     why = "it was handed back already" if handed_back is not None else f"after {blocks} retries"
     return _warning(errors, why)
 

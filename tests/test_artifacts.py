@@ -315,6 +315,44 @@ def test_an_unwritable_home_never_fails(tmp_path):
     result = hook("save_artifacts.py", stop(tmp_path), HARNESS_HOME=str(tmp_path / "home"))
     assert result.returncode == 0
     assert result.stderr.startswith("save_artifacts:")
+    message = json.loads(result.stdout)["systemMessage"]
+    assert message.startswith("agent-harness could not save the reviewer-qa report: ")
+    assert "is not writable" in message
+
+
+@pytest.mark.parametrize(
+    "prompt", ["Retro for SHOP-412. Do not write yet.", "  retro FOR SHOP-412"]
+)
+def test_a_retro_run_saves_nothing(tmp_path, prompt):
+    report = f"Lessons.\n\n{fenced('review', REVIEW)}"
+    tickets = save(tmp_path, stop(tmp_path, report, prompt=prompt))
+    assert not tickets.exists()
+
+
+@pytest.mark.parametrize(
+    ("prompt", "block", "key"),
+    [
+        ("Use UTF-8 and ISO-8601 dates in SHOP-412", {}, "SHOP-412"),
+        ("Follow PSR-12, RFC-7231 and HTTP-2 for SHOP-412", {}, "SHOP-412"),
+        ("Check SHA-256 sums", {}, "adhoc-20260304-a1"),
+        ("Review SHOP-412", {"ticket": "SHOP-500"}, "SHOP-500"),
+        ("Review SHOP-412", {"ticket": " SHOP-500 "}, "SHOP-500"),
+        ("Review SHOP-412", {"ticket": "UTF-8"}, "SHOP-412"),
+        ("Review SHOP-412", {"ticket": "../escape"}, "SHOP-412"),
+        ("Review SHOP-412", {"ticket": 7}, "SHOP-412"),
+    ],
+)
+def test_the_key_skips_standards_and_prefers_the_reports_block(tmp_path, prompt, block, key):
+    review = {name: value for name, value in REVIEW.items() if name != "ticket"}
+    report = f"Verdict.\n\n{fenced('review', {**review, **block})}"
+    tickets = save(tmp_path, stop(tmp_path, report, prompt=prompt))
+    assert [path.name for path in tickets.iterdir()] == [key]
+
+
+def test_the_ticket_override_still_wins_over_the_block(tmp_path):
+    report = f"Verdict.\n\n{fenced('review', {**REVIEW, 'ticket': 'SHOP-500'})}"
+    tickets = save(tmp_path, stop(tmp_path, report), HARNESS_TICKET="PROJ-1")
+    assert [path.name for path in tickets.iterdir()] == ["PROJ-1"]
 
 
 @pytest.mark.parametrize(

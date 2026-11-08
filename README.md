@@ -106,8 +106,10 @@ Then, per project:
 
 **Artifacts.** When the analyst, the estimator, the implementer or the reviewer finishes,
 `hooks/save_artifacts.py` keeps what it produced in `~/.claude/agent-harness/tickets/<KEY>/`
-(`HARNESS_HOME` moves the root). The key is the first ticket key in the agent's task
-(`HARNESS_TICKET` overrides it), otherwise `adhoc-<YYYYMMDD>-<agent id>`.
+(`HARNESS_HOME` moves the root). The key is `HARNESS_TICKET`, else the `ticket` of the
+report's structured block, else the first ticket key in the agent's task that is not a
+standard such as `UTF-8` or `ISO-8601`, otherwise `adhoc-<YYYYMMDD>-<agent id>`. A retro run
+(task starting "Retro for") is not saved, gated or estimate-checked.
 
 | File | Content |
 |---|---|
@@ -136,9 +138,9 @@ In auto mode a subagent delivers its report through the `SubagentHandback` tool 
 stops, so a `SubagentStop` block comes too late to hold it back. The gate and the estimate
 check therefore also run as a `PreToolUse` hook on that tool: they check the report in
 `tool_input.message` and deny the call, which sends the agent back to work. Both paths count
-against the same `max_blocks` per run, the handback path denies at most three times (Claude
-Code drops the report after the third retry), and a report that the handback path passed or
-let through is not checked again when the run stops. Unit tests cover both paths; there is no
+against the same `max_blocks` per run. Claude Code allows a limited number of handback
+retries; the gate denies at most twice. A report that the handback path passed or let through
+is not checked again when the run stops. Unit tests cover both paths; there is no
 end-to-end run of the handback path, because auto mode cannot be scripted with `claude -p`.
 
 ```json
@@ -148,17 +150,21 @@ end-to-end run of the handback path, because auto mode cannot be scripted with `
 ], "timeout": 300 } }
 ```
 
-- Each command runs in the repository root. `{files}` becomes the changed files whose path,
-  relative to that root, matches the regular expression `match` (all files without one). A
-  command with no matching file is skipped.
+- Each command runs through `/bin/sh` (POSIX shells assumed) in the repository root. `{files}`
+  becomes the changed files whose path, relative to that root, matches the regular expression
+  `match` (all files without one), each already quoted, so do not wrap `{files}` in double
+  quotes. A command with no matching file is skipped.
 - `timeout` is per command in seconds (default 300), and the gate as a whole stops after
   570 s. `max_blocks` (default 2) is how many times in a row it may block.
 - `HARNESS_GATE_COMMANDS` in the `env` of the settings, as JSON (the same object or only its
   command list), wins over the file, so a person can override the team's checks in
-  `.claude/settings.local.json`. A repository other than the session's uses its own
-  settings and file, run through the shell like its test command, so the same trust rule
-  applies.
-- Without a configuration the gate does nothing.
+  `.claude/settings.local.json`.
+- Only the session's repository is trusted to configure commands. Another repository uses its
+  own settings and file only when the session's `gate.repositories` lists it (paths relative
+  to the session's repository); changed files anywhere else are skipped, with a note in
+  `gates.json` and to the person.
+- Without a configuration the gate does nothing. When it cannot write under `HARNESS_HOME`,
+  it runs nothing and tells the person.
 
 ## Shell guard
 
@@ -171,16 +177,19 @@ Each deny reason names the rule and how to proceed.
 | Rule | Denied | Allowed |
 |---|---|---|
 | `force-push` | `git push --force`, `-f`, `+refspec` | a normal push |
+| `push-delete` | `git push --delete`, `-d`, `:ref`, `--prune`, `--mirror` | a normal push |
 | `force-with-lease` | `git push --force-with-lease` from a subagent | from the main agent, by default |
-| `git-discard` | `git reset --hard`, `git clean -f`, `git checkout .`/`-- .`, `git restore .` | in a repository inside the temp dirs; `clean -n`, `restore --staged .`, single files |
-| `rm-outside-allowed-dirs` | `rm -r`/`-rf`/`-fr`/`-R`, `find -delete`/`-exec rm`, `xargs rm -r` outside the allowed dirs | below `$TMPDIR` (`/tmp` when unset) or `/tmp/claude-*`, and in `allowed_rm_dirs` |
-| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `strings`, `xxd`, `base64` of a file in `secret_globs` | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c` or a `safe_filters` match; `secret_allow_globs` |
+| `git-discard` | `git reset --hard`, `git clean -f`, `git checkout .`/`-- .`/`-f`, `git restore .` | in a repository inside the temp dirs; `clean -n`, `restore --staged .`, single files |
+| `rm-outside-allowed-dirs` | `rm -r`/`-rf`/`-fr`/`-R`, `find -delete`/`-exec rm`, `xargs rm -r` outside the allowed dirs | below `$TMPDIR` (`/tmp` when unset) or `/tmp/claude-*`, the default build and cache dirs in the project, and `allowed_rm_dirs` |
+| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs` | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c` or a `safe_filters` match; `secret_allow_globs` |
 | `prod-db` | `mysql`, `mariadb`, `psql`, `mongosh`, `mongo`, `redis-cli` whose `-h`/`--host`, URI, `host=` or `PGHOST`/`MYSQL_HOST` matches `prod_db_hosts` | any host while `prod_db_hosts` is empty (the default) |
-| `destructive-sql` | `DROP DATABASE`/`TABLE`/`SCHEMA` or `TRUNCATE` in a database client's arguments or heredoc, for any host | `SELECT TRUNCATE(x, 2)` |
+| `destructive-sql` | `DROP DATABASE`/`TABLE`/`SCHEMA` or `TRUNCATE` in a database client's arguments or heredoc, or in the command piped into it, for any host | `SELECT TRUNCATE(x, 2)` |
+| `unparsable` | a `$(` that is never closed, so the rest of the command cannot be checked | |
 | `extra_deny` | a command matching one of your regexes, with your reason | |
 
 A relative path resolves against the working directory and follows `cd` in the command. A
-path with an unknown variable or `$(…)`, or in an unknown directory, counts as outside.
+path with an unknown variable or `$(…)`, or in an unknown directory, counts as outside; so
+does any relative path after more than 16 possible working directories (`cd a; …; cd b; …`).
 `/tmp/claude-501` itself is not below `/tmp/claude-*`, so it stays protected.
 
 The settings merge built-in defaults, `~/.claude/agent-harness/guard.json` (under
@@ -191,16 +200,16 @@ Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the 
 |---|---|
 | `scope` | `"subagents"`: only events with an `agent_type`; `"all"` checks the main session too |
 | `allow_force_with_lease` | `"main"`: the main agent only; `true` or `false` for everyone |
-| `secret_globs` | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `*credentials*`, `auth.json` |
+| `secret_globs` | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `credentials`, `credentials.json`, `*credentials.y*ml`, `.aws/credentials`, `*.credentials`, `auth.json` |
 | `secret_allow_globs` | `.env.example`, `.env.dist`, `*.pub` |
-| `allowed_rm_dirs` | none; each entry allows the dir and everything in it; a relative entry is relative to the project |
+| `allowed_rm_dirs` | built in: `node_modules`, `var/cache`, `dist`, `build`, `coverage`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `.ruff_cache` at any depth inside the project (`CLAUDE_PROJECT_DIR`, else the working directory), never the project itself; each entry you add allows the dir and everything in it, a relative one relative to the project |
 | `prod_db_hosts` | none; case-insensitive regexes searched in the host |
 | `safe_filters` | none; regexes searched in the pipe stage right after the read, its words joined by single spaces without quotes (`grep -v -E 'a\|b'` becomes `grep -v -E a\|b`) |
 | `extra_deny` | none; `{"pattern": "<regex searched in the whole command>", "reason": "<text>"}` |
 
-A glob without `/` matches the file name, one with `/` the path at any depth. An invalid file
-or key is ignored and named in the next deny reason. An internal error lets the command through
-and logs to stderr. Example ([`examples/agent-harness.json`](examples/agent-harness.json)):
+A glob without `/` matches the file name, one with `/` the path at any depth, both ignoring
+case. An invalid file or key is ignored and named in the next deny reason. An internal error
+lets the command through and logs to stderr. Example ([`examples/agent-harness.json`](examples/agent-harness.json)):
 
 ```json
 {
@@ -223,7 +232,10 @@ and logs to stderr. Example ([`examples/agent-harness.json`](examples/agent-harn
 
 The guard catches mistakes; it is not a sandbox against deliberate evasion. It does not see
 inside scripts a command runs (`./clean.sh`, `python -c`, `make`), commands piped into `sh`,
-or what `docker exec` and `ssh` run elsewhere, and it does not check the Read tool.
+what `docker exec` and `ssh` run elsewhere, SQL in a file fed to a client (`mysql < x.sql`),
+secrets read by other tools (`git diff`, `cp`, `sort`, `source .env`) or through a glob or
+`$(…)` in the file name, `$(…)` inside an unquoted heredoc, and it does not check the Read
+tool.
 
 ## Memory hygiene
 

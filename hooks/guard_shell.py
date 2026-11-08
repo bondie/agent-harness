@@ -3,10 +3,12 @@
 
 It parses the Bash command, including chains, pipes, subshells, `bash -c`, `eval`, `xargs`,
 `sudo`/`env` prefixes and heredocs fed to a shell, and denies with the rule and a safe
-alternative: force-pushes, `git reset --hard`/`clean -f`/`checkout .`/`restore .` outside the
-allowed temp dirs, `rm -r` and `find -delete`/`-exec rm` outside the allowed dirs, raw reads
-of secret files, connections to production database hosts and DROP/TRUNCATE in a database
-client command. Settings: built-in defaults, then `$HARNESS_HOME/guard.json` (default
+alternative: force-pushes and pushes that delete remote refs, `git reset --hard`/`clean -f`/
+`checkout .`/`checkout -f`/`restore .` outside the allowed temp dirs, `rm -r` and
+`find -delete`/`-exec rm` outside the allowed dirs (temp dirs, build and cache dirs in the
+project, `allowed_rm_dirs`), raw reads of secret files, connections to production database
+hosts, DROP/TRUNCATE in or piped into a database client command, and a `$(` never closed.
+Settings: built-in defaults, then `$HARNESS_HOME/guard.json` (default
 `~/.claude/agent-harness/guard.json`), then the `guard` key of the project's
 `.claude/agent-harness.json`. It catches mistakes; it is not a sandbox against deliberate
 evasion. Standard library only; on an internal error it allows the command and logs to stderr.
@@ -39,7 +41,11 @@ DEFAULTS: dict[str, Any] = {
         ".npmrc",
         ".pypirc",
         ".netrc",
-        "*credentials*",
+        "credentials",
+        "credentials.json",
+        "*credentials.y*ml",
+        ".aws/credentials",
+        "*.credentials",
         "auth.json",
     ],
     "secret_allow_globs": [".env.example", ".env.dist", "*.pub"],
@@ -57,8 +63,12 @@ LIST_KEYS = {
     "extra_deny",
 }
 REGEX_KEYS = {"prod_db_hosts", "safe_filters"}
+DEFAULT_RM_DIRS = ["node_modules", "var/cache", "dist", "build", "coverage", ".pytest_cache"]
+DEFAULT_RM_DIRS += ["__pycache__", ".mypy_cache", ".ruff_cache"]
 SCRATCHPADS = ["/tmp/claude-*", "/private/tmp/claude-*"]  # noqa: S108
 MAX_DEPTH = 8
+# Each `cd` after `;` can double the possible directories; beyond this they count as unknown.
+MAX_DIRS = 16
 
 REDIRECTS = {"<<<", "<<-", "<<", "<>", "<&", ">>", ">&", ">|", "&>>", "&>", "<", ">"}
 OPERATORS = sorted(
@@ -88,11 +98,15 @@ WRAPPERS: dict[str, set[str]] = {
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 GREPS = {"grep", "egrep", "fgrep"}
 READERS = GREPS | {"cat", "head", "tail", "less", "more", "sed", "awk", "gawk", "strings"}
-READERS |= {"xxd", "base64"}
+READERS |= {"xxd", "base64", "rg", "bat", "nl", "tac", "jq"}
 GREP_QUIET = {"-c", "-l", "-L", "-q", "--count", "--files-with-matches"}
 GREP_QUIET |= {"--files-without-match", "--quiet", "--silent"}
 GREP_LONG_VALUES = {"--regexp", "--file", "--max-count", "--after-context", "--before-context"}
 GREP_LONG_VALUES |= {"--context", "--include", "--exclude", "--exclude-dir", "--label"}
+RG_QUIET = GREP_QUIET | {"--files", "--count-matches"}
+RG_LONG_VALUES = GREP_LONG_VALUES | {"--glob", "--iglob", "--type", "--type-not", "--replace"}
+RG_LONG_VALUES |= {"--max-depth", "--encoding", "--threads", "--max-columns", "--pre"}
+JQ_PAIRS = {"--arg", "--argjson", "--slurpfile", "--rawfile"}
 DB_CLIENTS = {"mysql", "mariadb", "psql", "mongosh", "mongo", "redis-cli"}
 DB_HOST_ENV = {"PGHOST", "MYSQL_HOST"}
 DESTRUCTIVE_SQL = re.compile(r"\b(?:DROP\s+(?:DATABASE|TABLE|SCHEMA)\b|TRUNCATE\b(?!\s*\())", re.I)
@@ -238,6 +252,10 @@ def load_config(environ: Mapping[str, str], project: Path | None) -> Config:
             settings[key] = settings[key] + value if key in LIST_KEYS else value
     rm_dirs = [dir_pattern(entry, environ, None) for entry in SCRATCHPADS + temp_dirs(environ)]
     rm_trees = [dir_pattern(entry, environ, project) for entry in settings["allowed_rm_dirs"]]
+    if project is not None:
+        root = glob.escape(os.path.realpath(project))
+        rm_trees += [str(PurePath(root, name)) for name in DEFAULT_RM_DIRS]
+        rm_trees += [str(PurePath(root, "*", name)) for name in DEFAULT_RM_DIRS]
     return Config(
         scope=settings["scope"],
         allow_force_with_lease=settings["allow_force_with_lease"],
@@ -259,8 +277,30 @@ class Token:
     body: str = ""
 
 
-def balanced(script: str, start: int) -> tuple[str, int]:
-    depth, i, quote = 1, start, ""
+def heredoc_delimiter(script: str, i: int) -> tuple[str, int]:
+    while i < len(script) and script[i] in " \t":
+        i += 1
+    end = i
+    while end < len(script) and script[end] not in " \t\n;&|()<>":
+        end += 1
+    return re.sub(r"[\\'\"]", "", script[i:end]), end
+
+
+def skip_heredocs(script: str, i: int, delimiters: list[str]) -> int:
+    for delimiter in delimiters:
+        while i < len(script):
+            end = script.find("\n", i)
+            end = len(script) if end < 0 else end
+            line = script[i:end]
+            i = end + 1
+            if line.lstrip("\t") == delimiter:
+                break
+    return i
+
+
+def balanced(script: str, start: int) -> tuple[str, int, bool]:
+    """The text of `$(…)` up to its closing parenthesis, the index after it, and if it closed."""
+    depth, i, quote, heredocs = 1, start, "", []
     while i < len(script):
         char = script[i]
         if quote and char == "\\" and quote == '"':
@@ -273,13 +313,24 @@ def balanced(script: str, start: int) -> tuple[str, int]:
         if char == "\\":
             i += 2
             continue
+        if script.startswith("<<", i) and not script.startswith("<<<", i):
+            delimiter, i = heredoc_delimiter(script, i + (3 if script[i + 2 : i + 3] == "-" else 2))
+            heredocs.append(delimiter)
+            continue
+        if char == "\n" and heredocs:
+            i, heredocs = skip_heredocs(script, i + 1, heredocs), []
+            continue
+        if char == "#" and (i == start or script[i - 1] in " \t\n;&|("):
+            end = script.find("\n", i)
+            i = len(script) if end < 0 else end
+            continue
         if char in "'\"":
             quote = char
         depth += (char == "(") - (char == ")")
         if depth == 0:
-            return script[start:i], i + 1
+            return script[start:i], i + 1, True
         i += 1
-    return script[start:], len(script)
+    return script[start:], len(script), False
 
 
 def closing(script: str, start: int, quote: str) -> int:
@@ -306,6 +357,7 @@ class Lexer:
         self.in_word = False
         self.quoted = False
         self.heredocs: list[int] = []
+        self.unclosed = False
 
     def run(self) -> list[Token]:
         script = self.script
@@ -329,7 +381,8 @@ class Lexer:
                 self.i = end + 1
                 continue
             if script.startswith("$(", self.i):
-                inner, end = balanced(script, self.i + 2)
+                inner, end, closed = balanced(script, self.i + 2)
+                self.unclosed = self.unclosed or not closed
                 self.nested.append(inner)
                 self.add(script[self.i : end])
                 self.i = end
@@ -382,7 +435,8 @@ class Lexer:
                 i += 2
                 continue
             if script.startswith("$(", i):
-                inner, end = balanced(script, i + 2)
+                inner, end, closed = balanced(script, i + 2)
+                self.unclosed = self.unclosed or not closed
                 self.nested.append(inner)
                 out.append(script[i:end])
                 i = end
@@ -556,7 +610,31 @@ def reader_files(program: str, args: list[str]) -> list[str] | None:
     if program in ("awk", "gawk"):
         flags, operands = parse(args, "fvF", {"--file", "--assign", "--field-separator"})
         return operands if flags & {"-f", "--file"} else operands[1:]
+    if program == "rg":
+        flags, operands = parse(args, "efgtTmABCMjErd", RG_LONG_VALUES)
+        if flags & RG_QUIET:
+            return None
+        return operands if flags & {"-e", "-f", "--regexp", "--file"} else operands[1:]
+    if program == "jq":
+        return jq_files(args)
     return [arg for arg in args if not arg.startswith("-")]
+
+
+def jq_files(args: list[str]) -> list[str]:
+    files, operands, i = [], [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg in JQ_PAIRS:
+            files += args[i + 2 : i + 3] if arg in ("--slurpfile", "--rawfile") else []
+            i += 3
+            continue
+        i += 1
+        if arg in ("-f", "--from-file"):
+            operands.append("")
+            continue
+        if not arg.startswith("-") or arg == "-":
+            operands.append(arg)
+    return files + [operand for operand in operands[1:] if operand]
 
 
 def find_roots(args: list[str]) -> list[str]:
@@ -621,6 +699,12 @@ def uri_host(uri: str) -> str:
         return uri
 
 
+def capped(dirs: list[str | None]) -> list[str | None]:
+    """The possible working directories; past MAX_DIRS of them, one unknown directory."""
+    unique = list(dict.fromkeys(dirs))
+    return unique if len(unique) <= MAX_DIRS else [None]
+
+
 @dataclass
 class Denial:
     rule: str
@@ -649,6 +733,13 @@ class Checker:
             )
         lexer = Lexer(text)
         items = commands(lexer.run())
+        if lexer.unclosed:
+            return Denial(
+                "unparsable",
+                "a `$(` in the command is never closed, so the rest of it cannot be checked",
+                "close the command substitution; for a multi-line message, write it to a file "
+                "and pass the file (`git commit -F msg.txt`).",
+            )
         for index in range(len(items)):
             denial = self.item(items, index, depth)
             if denial:
@@ -677,7 +768,7 @@ class Checker:
         call = unwrap(item.words)
         denial = self.call(call, item, items, index, depth) if call else None
         if item.after == "||":
-            self.cwds = list(dict.fromkeys(self.history))
+            self.cwds = capped(self.history)
         return denial
 
     def call(
@@ -696,11 +787,11 @@ class Checker:
         if name == "find" and find_deletes(call.args):
             return self.find(call)
         if name == "git":
-            return self.git(call)
+            return self.git(call, items, index)
         if name in READERS:
             return self.secret_read(call, command, items, index)
         if name in DB_CLIENTS:
-            return self.database(call, command)
+            return self.database(call, command, items, index)
         return None
 
     def path(self, text: str, cwd: str | None) -> str | None:
@@ -732,11 +823,11 @@ class Checker:
         target = operands[0] if operands else "~"
         known = call.program != "popd" and "-" not in call.args
         new = [self.path(target, cwd) if known else None for cwd in self.cwds]
-        self.history = list(dict.fromkeys(self.history + new))
+        self.history = capped(self.history + new)
         if after == "&&":
-            self.cwds = list(dict.fromkeys(new))
+            self.cwds = capped(new)
             return
-        self.cwds = list(dict.fromkeys(self.cwds + new))
+        self.cwds = capped(self.cwds + new)
 
     def shell(self, call: Call, command: Command, depth: int) -> Denial | None:
         has_c, operand = shell_script(call.args)
@@ -792,11 +883,11 @@ class Checker:
             "rm-outside-allowed-dirs",
             f"{what} on {', '.join(outside)}, which is not inside {self.allowed_text()} "
             "(a path with a variable or in an unknown directory counts as outside)",
-            "delete only literal paths in those dirs, add the dir to allowed_rm_dirs in the "
-            "guard config, or ask the person to delete it.",
+            "delete only literal paths in those dirs, add the dir to `allowed_rm_dirs` under "
+            "`guard` in the project's .claude/agent-harness.json, or ask the person to delete it.",
         )
 
-    def git(self, call: Call) -> Denial | None:
+    def git(self, call: Call, items: list[Command | str], index: int) -> Denial | None:
         dirs = list(self.cwds)
         args = call.args
         i = 0
@@ -811,6 +902,8 @@ class Checker:
         sub, rest = args[i], args[i + 1 :]
         if sub == "push":
             return self.push(rest)
+        if sub in ("show", "log"):
+            return self.git_secret(sub, rest, items, index)
         discard = self.discards(sub, rest, dirs)
         if discard is None or all(self.inside(d) for d in dirs):
             return None
@@ -832,6 +925,20 @@ class Checker:
                 "push without force. If the history really must be rewritten, the person runs "
                 "the force-push; a subagent puts it in its report.",
             )
+        deletes = any(
+            arg in ("--delete", "--mirror", "--prune")
+            or short_flag(arg, "d", "o")
+            or (arg.startswith(":") and len(arg) > 1)
+            for arg in rest
+        )
+        if deletes:
+            return Denial(
+                "push-delete",
+                "`git push --delete` (or `-d`, `:ref`, `--prune`, `--mirror`) deletes branches or "
+                "tags on the remote, and `--mirror` also overwrites every remote branch",
+                "push the branch without deleting anything. Deleting remote refs is for the "
+                "person to do; a subagent puts it in its report.",
+            )
         lease = any(a == "--force-with-lease" or a.startswith("--force-with-lease=") for a in rest)
         setting = self.config.allow_force_with_lease
         if not lease or setting is True or (setting == "main" and not self.subagent):
@@ -847,6 +954,8 @@ class Checker:
     def discards(self, sub: str, rest: list[str], dirs: list[str | None]) -> str | None:
         if sub == "reset" and "--hard" in rest:
             return "reset --hard"
+        if sub == "checkout" and ("--force" in rest or any(short_flag(a, "f", "bB") for a in rest)):
+            return "checkout --force"
         if sub == "clean":
             force = "--force" in rest or any(short_flag(a, "f", "e") for a in rest)
             dry = "--dry-run" in rest or any(short_flag(a, "n", "e") for a in rest)
@@ -880,12 +989,30 @@ class Checker:
         if files is None:
             return None
         files += [target for op, target in command.redirects if op == "<"]
+        return self.secret_denial(call.program, files, items, index)
+
+    def git_secret(
+        self, sub: str, rest: list[str], items: list[Command | str], index: int
+    ) -> Denial | None:
+        dashes = rest.index("--") if "--" in rest else len(rest)
+        paths = rest[dashes + 1 :]
+        if sub == "show":
+            paths += [arg.split(":", 1)[1] for arg in rest[:dashes] if ":" in arg]
+        if sub == "log" and not {"-p", "-u", "--patch"} & set(rest):
+            return None
+        if sub == "log":
+            paths += [arg for arg in rest[:dashes] if not arg.startswith("-")]
+        return self.secret_denial(f"git {sub}", paths, items, index)
+
+    def secret_denial(
+        self, program: str, files: list[str], items: list[Command | str], index: int
+    ) -> Denial | None:
         secret = next((file for file in files if self.is_secret(file)), None)
         if secret is None or self.safe_pipe(items, index):
             return None
         return Denial(
             "secret-read",
-            f"`{call.program}` would print {secret} raw into the transcript, and the file "
+            f"`{program}` would print {secret} raw into the transcript, and the file "
             "matches secret_globs",
             "show key names or masked values instead (a script that parses the file and "
             "prints its keys), count or list matches with `grep -c`/`-l`/`-q`, or pipe the "
@@ -898,9 +1025,10 @@ class Checker:
         )
 
     def matches(self, file: str, globs: list[str]) -> bool:
-        name = PurePath(file).name
+        name = PurePath(file).name.lower()
         paths = [file] + [p for p in (self.path(file, cwd) for cwd in self.cwds) if p]
-        for pattern in globs:
+        paths = [path.lower() for path in paths]
+        for pattern in (item.lower() for item in globs):
             if "/" not in pattern and fnmatchcase(name, pattern):
                 return True
             anchored = pattern if pattern.startswith("/") else "*/" + pattern
@@ -925,7 +1053,9 @@ class Checker:
         text = " ".join(following.words)
         return any(pattern.search(text) for pattern in self.config.safe_filters)
 
-    def database(self, call: Call, command: Command) -> Denial | None:
+    def database(
+        self, call: Call, command: Command, items: list[Command | str], index: int
+    ) -> Denial | None:
         for host in db_hosts(call):
             if any(pattern.search(host) for pattern in self.config.prod_db_hosts):
                 return Denial(
@@ -934,7 +1064,11 @@ class Checker:
                     "work against a local or staging database; production queries are for "
                     "the person to run.",
                 )
-        if any(DESTRUCTIVE_SQL.search(text) for text in call.args + command.stdin):
+        texts = call.args + command.stdin
+        upstream = items[index - 1] if index > 0 else None
+        if isinstance(upstream, Command) and upstream.after in PIPES:
+            texts += upstream.words + upstream.stdin
+        if any(DESTRUCTIVE_SQL.search(text) for text in texts):
             return Denial(
                 "destructive-sql",
                 f"`{call.program}` gets DROP DATABASE/TABLE/SCHEMA or TRUNCATE",
