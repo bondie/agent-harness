@@ -1,3 +1,4 @@
+import importlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ from agent_harness.artifacts import (
     ticket_dir,
     ticket_dirs,
 )
+
+HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 
 ESTIMATE = {
     "ticket": "SHOP-412",
@@ -298,3 +301,25 @@ def test_append_escaped_and_report_blocks_on_malformed_files(tmp_path):
     )
     assert report_blocks(tmp_path, "review") == [REVIEW]
     assert report_blocks(tmp_path, "implementation") == []
+
+
+REPORTS = {
+    "plain": "Done.\n\n```json harness-implementation\n{body}\n```",
+    "indented in a list": "- Files:\n\n  ```json harness-implementation\n  {body}\n  ```",
+    "tab and trailing blanks": "```json\tharness-implementation \n{body}\n```  ",
+    "reserved kind": "```json harness-outcome\n{body}\n```",
+    "nested too deep": "```json harness-implementation\n" + "[" * 10**5 + "]" * 10**5 + "\n```",
+}
+
+
+@pytest.mark.parametrize("report", REPORTS.values(), ids=REPORTS.keys())
+def test_report_blocks_reads_the_blocks_save_artifacts_saves(report, tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(HOOKS))
+    save_artifacts = importlib.import_module("save_artifacts")
+    text = report.format(body=json.dumps({"ticket": "SHOP-412", "files": ["src/Price.php"]}))
+    (tmp_path / "implementer.01.md").write_text(text + "\n")
+
+    for kind in ("implementation", "outcome"):
+        blocks = save_artifacts.structured_blocks(text)
+        saved = [block.value for block in blocks if block.kind == kind and block.value]
+        assert report_blocks(tmp_path, kind) == saved

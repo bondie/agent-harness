@@ -137,14 +137,21 @@ def read_json(path: Path, warnings: list[str]) -> Any:
         return None
 
 
+def harness_home(environ: Mapping[str, str]) -> Path:
+    custom = environ.get("HARNESS_HOME", "").strip()
+    if custom:
+        return Path(custom).expanduser()
+    return Path.home() / ".claude" / "agent-harness"
+
+
 def config_sources(
     environ: Mapping[str, str], project: Path | None, warnings: list[str]
 ) -> list[tuple[str, Any]]:
-    home = environ.get("HARNESS_HOME") or str(Path.home() / ".claude" / "agent-harness")
+    user_path = harness_home(environ) / "guard.json"
     sources: list[tuple[str, Any]] = []
-    user = read_json(Path(home) / "guard.json", warnings)
+    user = read_json(user_path, warnings)
     if user is not None:
-        sources.append((str(Path(home) / "guard.json"), user))
+        sources.append((str(user_path), user))
     if project is None:
         return sources
     path = project / ".claude" / "agent-harness.json"

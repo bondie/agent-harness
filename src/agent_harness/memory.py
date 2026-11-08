@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
+
+from .artifacts import harness_home as harness_home
 
 INDEX = "MEMORY.md"
 BULLET = re.compile(r"[-*+]\s")
@@ -59,10 +60,6 @@ class FileReport:
     @property
     def over_cap(self) -> bool:
         return self.size > self.cap_kb * 1024
-
-
-def harness_home() -> Path:
-    return Path(os.environ.get("HARNESS_HOME") or Path.home() / ".claude" / "agent-harness")
 
 
 def _size_kb(value: Any, default: float) -> float:
