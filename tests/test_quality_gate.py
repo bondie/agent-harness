@@ -309,6 +309,144 @@ def test_a_pass_after_a_block_records_the_block_and_starts_over(tmp_path, check)
     assert "block 1 of at most 2" in answer["reason"]
 
 
+def handing_back(
+    tmp_path: Path,
+    cwd: Path,
+    report: str = "Done.",
+    agent: str = "agent-harness:implementer",
+    tool: str = "SubagentHandback",
+) -> dict[str, Any]:
+    transcript(tmp_path, user("Implement SHOP-412"), name="agent-i1")
+    return {
+        "hook_event_name": "PreToolUse",
+        "agent_id": "i1",
+        "agent_type": agent,
+        "transcript_path": f"{tmp_path}.jsonl",
+        "cwd": str(cwd),
+        "tool_name": tool,
+        "tool_input": {"message": report},
+    }
+
+
+def denied(answer: dict[str, Any] | None) -> str | None:
+    if answer is None or "hookSpecificOutput" not in answer:
+        return None
+    output = answer["hookSpecificOutput"]
+    assert (output["hookEventName"], output["permissionDecision"]) == ("PreToolUse", "deny")
+    return str(output["permissionDecisionReason"])
+
+
+def test_a_failing_handback_is_denied_with_the_gate_output(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint", 1), "match": r"\.py$"}])
+    touch(repo, "src/shop.py")
+
+    reason = denied(gate(tmp_path, handing_back(tmp_path, repo)))
+
+    assert reason is not None
+    assert "block 1 of at most 2" in reason
+    assert "call SubagentHandback again with the whole report" in reason
+    assert f'lint {repo} ["src/shop.py"]' in reason
+    assert (gates(tmp_path)["passed"], gates(tmp_path)["blocks"]) == (False, 1)
+
+
+def test_the_handback_checks_the_files_in_its_message(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint")}])
+    touch(repo, "src/a.py", "src/b.py")
+    report = "Done.\n\n" + fenced("implementation", {"files": ["src/b.py"]})
+
+    assert gate(tmp_path, handing_back(tmp_path, repo, report)) is None
+
+    assert gates(tmp_path)["commands"][0]["output_tail"] == f'lint {repo} ["src/b.py"]'
+
+
+@pytest.mark.parametrize(
+    ("agent", "tool"),
+    [("agent-harness:reviewer-qa", "SubagentHandback"), ("agent-harness:implementer", "Bash")],
+)
+def test_the_handback_path_is_only_the_implementers_handback(tmp_path, check, agent, tool):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint", 1)}])
+    touch(repo, "src/shop.py")
+
+    assert gate(tmp_path, handing_back(tmp_path, repo, agent=agent, tool=tool)) is None
+    assert not (tmp_path / "home/tickets").exists()
+
+
+def test_a_handback_that_passed_is_not_checked_again_when_the_run_stops(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint")}])
+    touch(repo, "src/shop.py")
+    assert gate(tmp_path, handing_back(tmp_path, repo)) is None
+
+    configure(repo, [{"cmd": check("lint", 1)}])
+    assert gate(tmp_path, finished(tmp_path, repo)) is None
+    assert gates(tmp_path)["passed"] is True
+
+    answer = gate(tmp_path, finished(tmp_path, repo))
+    assert answer is not None
+    assert "block 1 of at most 2" in answer["reason"]
+
+
+def test_handback_and_stop_share_one_block_count(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint", 1)}])
+    touch(repo, "src/shop.py")
+
+    assert "block 1 of at most 2" in (denied(gate(tmp_path, handing_back(tmp_path, repo))) or "")
+    stopped = gate(tmp_path, finished(tmp_path, repo, stop_hook_active=False))
+    assert stopped is not None
+    assert "block 2 of at most 2" in stopped["reason"]
+    final = gate(tmp_path, finished(tmp_path, repo, stop_hook_active=True))
+    assert final is not None
+    assert final["systemMessage"].startswith("The quality gate still fails")
+    assert gates(tmp_path)["blocks"] == 2
+
+
+def test_a_handback_let_through_after_the_limit_is_not_blocked_at_stop(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint", 1)}])
+    touch(repo, "src/shop.py")
+
+    answers = [gate(tmp_path, handing_back(tmp_path, repo)) for _ in range(3)]
+
+    assert [denied(answer) is not None for answer in answers] == [True, True, False]
+    assert answers[2] == {
+        "systemMessage": "The quality gate still fails and the implementer finished anyway: "
+        f"{gates(tmp_path)['commands'][0]['cmd']}. "
+        f"See {tmp_path / 'home/tickets/SHOP-412/gates.json'}."
+    }
+    assert gate(tmp_path, finished(tmp_path, repo, stop_hook_active=False)) is None
+    assert gates(tmp_path)["blocks"] == 2
+
+
+def test_the_handback_path_denies_at_most_three_times(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, {"commands": [{"cmd": check("lint", 1)}], "max_blocks": 5})
+    touch(repo, "src/shop.py")
+
+    answers = [gate(tmp_path, handing_back(tmp_path, repo)) for _ in range(4)]
+
+    assert [denied(answer) is not None for answer in answers] == [True, True, True, False]
+    assert "block 3 of at most 3" in (denied(answers[2]) or "")
+
+
+def test_a_count_written_by_an_older_version_still_counts(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint", 1)}])
+    touch(repo, "src/shop.py")
+    state = tmp_path / "home/tickets/SHOP-412/gate-blocks.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"i1": 1, "other": {"blocks": "x"}, "third": True}))
+
+    answer = gate(tmp_path, finished(tmp_path, repo, stop_hook_active=True))
+
+    assert answer is not None
+    assert "block 2 of at most 2" in answer["reason"]
+    assert json.loads(state.read_text()) == {"i1": {"blocks": 2, "handback": None}}
+
+
 @pytest.mark.parametrize(("max_blocks", "blocked"), [(0, False), (1, True), ("3", True)])
 def test_max_blocks_is_configurable(tmp_path, check, max_blocks, blocked):
     repo = git_repository(tmp_path / "shop")

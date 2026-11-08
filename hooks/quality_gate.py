@@ -13,6 +13,14 @@ that root; a command with no matching file is skipped. The result goes to `gates
 ticket's artifacts directory. A failure blocks the implementer from finishing and hands it the
 output, at most `max_blocks` times in a row; after that it may finish and the gate stays
 failed. Standard library only, and it never fails the session.
+
+In auto mode the implementer delivers its report through SubagentHandback before it stops, so
+a SubagentStop block comes too late. The same script runs as a PreToolUse hook on that tool:
+it checks the report in `tool_input.message` and denies the call on a failure, which sends the
+implementer back to work. Both paths share one block count per run. Claude Code asks for a
+denied handback again at most three times and then drops the report, so this path denies at
+most three times whatever `max_blocks` says. When the handback passed the gate (or was let
+through after the last block), SubagentStop does not run it again.
 """
 
 from __future__ import annotations
@@ -27,13 +35,15 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any, TextIO
 
 from run_tests import is_implementer, is_session_repository, repository_env
 from save_artifacts import (
+    HANDBACK,
+    agent_transcript,
     final_report,
     harness_home,
     locked,
@@ -49,6 +59,8 @@ STATE = "gate-blocks.json"
 TAIL_LINES = 40
 DEFAULT_TIMEOUT = 300.0
 DEFAULT_MAX_BLOCKS = 2
+HANDBACK_RETRIES = 3
+DENIED, DELIVERED = "denied", "delivered"
 # Stays below the 600 s the plugin gives this hook, so it can still record the result.
 BUDGET = 570.0
 
@@ -67,6 +79,12 @@ class Gate:
     checks: tuple[Check, ...]
     timeout: float
     max_blocks: int
+
+
+@dataclass(frozen=True)
+class Run:
+    blocks: int = 0
+    handback: str | None = None
 
 
 def parse_check(item: Any) -> Check | None:
@@ -297,26 +315,62 @@ def run_gates(gates: dict[Path, Gate], changed: dict[Path, list[str]]) -> list[d
     return results
 
 
-def read_state(path: Path) -> dict[str, int]:
+def is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def read_state(path: Path) -> dict[str, Run]:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(state, dict):
         return {}
-    return {
-        str(key): value
-        for key, value in state.items()
-        if isinstance(value, int) and not isinstance(value, bool)
-    }
+    runs = {}
+    for key, value in state.items():
+        if is_count(value):
+            runs[str(key)] = Run(value)
+            continue
+        if not isinstance(value, dict) or not is_count(value.get("blocks")):
+            continue
+        handback = value.get("handback")
+        runs[str(key)] = Run(value["blocks"], handback if handback in (DENIED, DELIVERED) else None)
+    return runs
 
 
-def block_reason(commands: list[dict[str, Any]], blocks: int, limit: int) -> str:
+def write_state(path: Path, state: dict[str, Run]) -> None:
+    write_json(path, {key: asdict(run) for key, run in state.items()})
+
+
+def checked_at_handback(directory: Path, agent_id: str) -> bool:
+    """The handback path already ran the gate on this run's report; the run is over."""
+    path = directory / STATE
+    if not path.is_file():
+        return False
+    with locked(directory):
+        state = read_state(path)
+        if state.get(agent_id, Run()).handback != DELIVERED:
+            return False
+        del state[agent_id]
+        write_state(path, state)
+    return True
+
+
+def handed_back_report(event: dict[str, Any]) -> str:
+    tool_input = event.get("tool_input")
+    message = tool_input.get("message") if isinstance(tool_input, dict) else None
+    return message if isinstance(message, str) else ""
+
+
+def block_reason(
+    commands: list[dict[str, Any]], blocks: int, limit: int, at_handback: bool = False
+) -> str:
     parts = [
         f"The quality gate failed (block {blocks} of at most {limit}), so you cannot finish yet. "
         "Fix the cause, run the check again and show its output in your report; never weaken "
         "or skip the check. When the failure is not caused by your change and fixing it is "
         "outside the approved scope, say so in your report instead."
+        + (" Then call SubagentHandback again with the whole report." if at_handback else "")
     ]
     for command in commands:
         if command["exit"] == 0:
@@ -330,11 +384,29 @@ def block_reason(commands: list[dict[str, Any]], blocks: int, limit: int) -> str
     return "\n\n".join(parts)
 
 
+def deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
 def gate(event: dict[str, Any], environ: Mapping[str, str], stdout: TextIO) -> None:
     if not is_implementer(event.get("agent_type")):
         return
-    entries = read_transcript(event.get("agent_transcript_path"))
-    report = final_report(entries, event)
+    at_handback = event.get("hook_event_name") == "PreToolUse"
+    if at_handback and event.get("tool_name") != HANDBACK:
+        return
+    entries = read_transcript(agent_transcript(event))
+    key = ticket_key(event, entries, environ)
+    directory = harness_home(environ) / "tickets" / key
+    agent_id = str(event.get("agent_id") or "")
+    if not at_handback and checked_at_handback(directory, agent_id):
+        return
+    report = handed_back_report(event) if at_handback else final_report(entries, event)
     cwd = Path(str(event.get("cwd") or "."))
     root = toplevel(cwd.resolve())
     changed = changed_files(cwd, root, report)
@@ -346,23 +418,25 @@ def gate(event: dict[str, Any], environ: Mapping[str, str], stdout: TextIO) -> N
     commands = run_gates(gates, changed)
     passed = all(command["exit"] == 0 for command in commands)
     limit = min(found.max_blocks for found in gates.values())
-    key = ticket_key(event, entries, environ)
-    directory = harness_home(environ) / "tickets" / key
-    agent_id = str(event.get("agent_id") or "")
+    if at_handback:
+        limit = min(limit, HANDBACK_RETRIES)
     with locked(directory):
         state = read_state(directory / STATE)
-        used = state.pop(agent_id, 0)
-        if event.get("stop_hook_active") is False:
+        run = state.pop(agent_id, Run())
+        used = run.blocks
+        if not at_handback and run.handback is None and event.get("stop_hook_active") is False:
             used = 0
-        blocks = used
-        if not passed and used < limit:
-            blocks = used + 1
-            state[agent_id] = blocks
-        write_json(directory / STATE, state)
+        blocks = used + 1 if not passed and used < limit else used
+        if at_handback:
+            state[agent_id] = Run(blocks, DENIED if blocks > used else DELIVERED)
+        if not at_handback and blocks > used:
+            state[agent_id] = Run(blocks, run.handback)
+        write_state(directory / STATE, state)
         result = {"ticket": key, "ran_at": now(), "repo": str(repos[0]), "passed": passed}
         write_json(directory / "gates.json", {**result, "blocks": blocks, "commands": commands})
     if blocks > used:
-        json.dump({"decision": "block", "reason": block_reason(commands, blocks, limit)}, stdout)
+        reason = block_reason(commands, blocks, limit, at_handback)
+        json.dump(deny(reason) if at_handback else {"decision": "block", "reason": reason}, stdout)
         return
     if passed:
         return

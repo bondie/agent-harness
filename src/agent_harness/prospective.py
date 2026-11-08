@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .artifacts import Json, read_json
+from .estimate_check import validate_and_total
 from .metrics import Prediction, absolute_errors
 
 PART_KINDS = ("implementation", "verification", "release")
@@ -22,27 +23,14 @@ ACTUAL_SOURCES = ("measured", "worklog")
 EPSILON = 1e-9
 
 
-def round_half_hour(hours: float) -> float:
-    return max(0.5, math.floor(hours * 2 + 0.5) / 2)
-
-
 def estimate_total(estimate: Json) -> float:
-    """The contract's total, never the model's own number.
-
-    TODO(lead): switch to the shared total of the estimate validator (S3) at integration.
-    """
-    mode = estimate.get("mode")
-    if mode not in MODES:
-        raise ValueError(f"Estimate mode must be one of {', '.join(MODES)}, not {mode!r}")
-    adjustments = sum(_hours(item) for item in estimate.get("adjustments") or [])
-    if mode == "bottom-up":
-        return round_half_hour(
-            sum(_hours(part) for part in estimate.get("parts") or []) + adjustments
+    """The total the estimate check computes, never the model's own number."""
+    total, problems = validate_and_total(estimate)
+    if total is None:
+        raise ValueError(
+            "The estimate does not pass the harness-estimate check: " + " ".join(problems)
         )
-    median = estimate.get("reference_median")
-    if not isinstance(median, int | float):
-        raise ValueError("A reference estimate needs a reference_median")
-    return round_half_hour(float(median) + adjustments)
+    return total
 
 
 def _hours(item: object) -> float:

@@ -290,7 +290,14 @@ def decision(event: dict[str, Any], environ: dict[str, str] | None = None) -> di
 
 
 def main(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
-    verdict = decision(json.load(stdin))
+    try:
+        verdict = decision(json.load(stdin))
+    except Exception as error:
+        print(
+            f"guard_memory_writes.py allowed the write after an internal error: {error!r}",
+            file=sys.stderr,
+        )
+        return 0
     if verdict is not None:
         json.dump(verdict, stdout)
     return 0

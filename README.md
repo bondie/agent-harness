@@ -46,10 +46,10 @@ its own marketplace.
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
 | `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
 | `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/`. |
-| `hooks/quality_gate.py` | When **the implementer** finishes, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
+| `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database ([rules](#shell-guard)). |
-| `hooks/estimate_check.py` | When the estimator stops, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
+| `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
 ```mermaid
@@ -131,6 +131,15 @@ checks on them and writes `gates.json`. A failure blocks the implementer from fi
 `SubagentStop` decision `block`) and hands it the command and the end of its output. After two
 blocks in a row it lets the implementer finish and the gate stays failed, so a check it cannot
 fix does not loop.
+
+In auto mode a subagent delivers its report through the `SubagentHandback` tool before it
+stops, so a `SubagentStop` block comes too late to hold it back. The gate and the estimate
+check therefore also run as a `PreToolUse` hook on that tool: they check the report in
+`tool_input.message` and deny the call, which sends the agent back to work. Both paths count
+against the same `max_blocks` per run, the handback path denies at most three times (Claude
+Code drops the report after the third retry), and a report that the handback path passed or
+let through is not checked again when the run stops. Unit tests cover both paths; there is no
+end-to-end run of the handback path, because auto mode cannot be scripted with `claude -p`.
 
 ```json
 { "gate": { "commands": [

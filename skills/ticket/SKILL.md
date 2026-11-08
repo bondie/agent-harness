@@ -26,8 +26,10 @@ recent finished tickets (the tracker's worklogs) next to the size of their commi
 ticket (`git log --author=<person> --numstat`, grouped by the ticket key in the message).
 Ten to twenty tickets of different sizes are enough.
 
-When the person rejects an estimate, tell the estimator what they said, so that it records
-the correction in its memory.
+When the person rejects an estimate, give the estimator what they said and ask it to propose
+the correction as one memory line, `- <correction and revised estimate> (source: <KEY>,
+<today>)`, without writing it. Show the line to the person; send it back to be written exactly
+as given only once they approve or edit it, as in the retro.
 
 When the project's instructions (CLAUDE.md) name a date since which the team works
 differently, for example implementing with AI agents, tell the estimator the date and ask

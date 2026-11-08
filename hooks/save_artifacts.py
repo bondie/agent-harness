@@ -72,6 +72,20 @@ def read_transcript(path: Any) -> list[dict[str, Any]]:
     return entries
 
 
+def agent_transcript(event: dict[str, Any]) -> str | None:
+    """The subagent's own transcript; tool events carry only the session's, next to it."""
+    path = event.get("agent_transcript_path")
+    if isinstance(path, str) and path:
+        return path
+    session, agent_id = event.get("transcript_path"), event.get("agent_id")
+    if not isinstance(session, str) or not session or not isinstance(agent_id, str) or not agent_id:
+        return None
+    name = f"agent-{agent_id}.jsonl"
+    if Path(session).name == name:
+        return session
+    return str(Path(session).with_suffix("") / "subagents" / name)
+
+
 def task_prompt(entries: list[dict[str, Any]]) -> str:
     for entry in entries:
         if entry.get("type") != "user" or entry.get("isMeta"):

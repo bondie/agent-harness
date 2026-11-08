@@ -3,6 +3,7 @@ import json
 import numpy as np
 import pytest
 
+from agent_harness.estimate_check import round_half as round_half_hour
 from agent_harness.prospective import (
     MODES,
     PART_KINDS,
@@ -14,7 +15,6 @@ from agent_harness.prospective import (
     load_cases,
     part_pairs,
     report,
-    round_half_hour,
 )
 
 GRID = [k / 2 for k in range(1, 400)]
@@ -89,6 +89,11 @@ def test_reference_total_is_the_median_plus_adjustments_rounded():
     assert estimate_total(estimate) == brute_round(3.5 - 1.25)
 
 
+def test_the_total_is_the_one_the_estimate_check_computes():
+    estimate = {"mode": "bottom-up", "parts": [part("release", 1.15), part("release", 0.1)]}
+    assert estimate_total(estimate) == 1.5
+
+
 def test_a_total_is_never_below_half_an_hour():
     estimate = {"mode": "reference", "reference_median": 1.0, "adjustments": [adjustment(-2)]}
     assert estimate_total(estimate) == 0.5
@@ -101,6 +106,8 @@ def test_a_total_is_never_below_half_an_hour():
         ({"mode": "reference", "reference_median": None}, "reference_median"),
         ({"mode": "bottom-up", "parts": [{"hours": "two"}]}, "number"),
         ({"mode": "bottom-up", "parts": [{"hours": float("nan")}]}, "number"),
+        ({"mode": "reference", "reference_median": 1, "adjustments": [{"hours": 1}]}, "citation"),
+        ({"mode": "bottom-up", "parts": [{"kind": "release", "hours": 1}]}, "evidence"),
     ],
 )
 def test_estimate_total_rejects_malformed_estimates(estimate, message):
@@ -128,7 +135,7 @@ def test_no_pairs_no_errors():
 
 def random_case(rng, index):
     mode = MODES[int(rng.integers(len(MODES)))]
-    kinds = some(rng, PART_KINDS)
+    kinds = some(rng, PART_KINDS) or (list(PART_KINDS[:1]) if mode == "bottom-up" else [])
     estimate = {
         "ticket": f"SHOP-{index}",
         "mode": mode,
