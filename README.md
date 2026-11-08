@@ -40,14 +40,14 @@ its own marketplace.
 | `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria and the codebase's review skill when there is one, runs the checks, reports `path:line` findings and a verdict. Runs on the session's model at `xhigh` effort. Does not edit; remembers rejected findings and recurring defects. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
 | `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. |
-| `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened and has each agent record its lessons in its memory. |
+| `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened; each agent proposes lessons for its memory and writes the ones the person approves. |
 | `/agent-harness:upgrade-impact` | A [dynamic workflow](https://code.claude.com/docs/en/workflows): before a dependency upgrade, one agent per component group reads the changelog in the version range and finds the changes your code uses; skeptics try to refute each risk. Returns the risks that survive, with `repo:path:line` and a test for each. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
 | `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
 | `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/`. |
 | `hooks/quality_gate.py` | When **the implementer** finishes, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
-| `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory. |
+| `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database ([rules](#shell-guard)). |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
@@ -249,6 +249,54 @@ missing. The backtest measures only the reference class mode: its tickets have n
 It never reads the ticket's existing estimate or logged time: a model shown a number anchors
 on it ([Çalikli & Alhamed, FSE 2025](https://doi.org/10.1145/3715771)), and the person
 comparing estimates needs an independent one.
+
+## Memory hygiene
+
+Each agent keeps its memory in `~/.claude/agent-memory/<agent>/` (`memory: user`): the index
+`MEMORY.md`, which Claude Code loads into the agent's prompt, and topic files. A note without a
+source or a date cannot be checked or retired, so every lesson is one bullet that ends with
+both:
+
+```text
+- <lesson text> (source: <KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])
+```
+
+Lines indented by two spaces continue the bullet above. Headings, prose, front matter, fenced
+code and the index links in `MEMORY.md` (`- [Title](file.md) — hook`) are not lessons.
+
+**The guard.** `hooks/guard_memory_writes.py` checks every Write, Edit and MultiEdit that one of
+the four agents makes in its own memory directory:
+
+- Every new or changed lesson must end with its source and date, and an expiry must come after
+  the date. Lessons already in the file are not checked, so older notes never block a write;
+  an Edit checks the lessons its `new_string` adds.
+- A file may not grow past its cap: 8 KB for a topic file, 4 KB for `MEMORY.md`. A write that
+  shrinks an oversized file always passes, so compacting it is never blocked.
+
+The deny reason names each failing line and shows the format. The main session and other
+agents are not checked. The caps and the source requirement live in
+`~/.claude/agent-harness/memory.json` (`$HARNESS_HOME/memory.json` when that is set); a value
+that is not a positive number, or for `require_source` a boolean, falls back to the default.
+With `"require_source": false` a date alone, `(YYYY-MM-DD)`, is enough.
+
+```json
+{ "max_file_kb": 8, "max_index_kb": 4, "require_source": true }
+```
+
+**The lint**, from a checkout of this repository:
+
+```bash
+uv run harness-eval memory lint [--dir ~/.claude/agent-memory]
+uv run harness-eval memory prune --expired [--apply]
+```
+
+`lint` lists, per agent and file, the undated lessons, the ones without a source, the expired
+ones, dead paths and the files over the cap, and exits with 1 when it finds any. A dead path is
+an absolute path in a lesson that does not exist although its top directory does; URL paths
+and a container's `/app/…` are skipped that way, a container path under `/usr` or `/tmp` is
+not. `prune --expired` removes the lessons whose expiry date has come, with their continuation
+lines; without `--apply` it only lists them. The `retro` skill writes only the lines the person
+approved and suggests the lint every few retros.
 
 ## Workflows
 

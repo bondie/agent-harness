@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 from ticket_precedent.config import build_searcher, load_config
 from ticket_precedent.search import Searcher
 from ticket_precedent.store import Store
 
+from . import memory
 from .baselines import EraScaledMedian, Estimator, HumanEstimate, NeighbourMedian
 from .dataset import load_targets, sample
 from .llm import Backend, ClaudeCode, LLMEstimator, Ollama
@@ -31,7 +33,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="harness-eval", description="Backtest effort estimators on finished tickets."
+        prog="harness-eval",
+        description="Backtest effort estimators on finished tickets; lint the agents' memory.",
     )
     commands = parser.add_subparsers(required=True)
 
@@ -63,6 +66,20 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument("directory", type=Path)
     cmd.add_argument("--baseline", default="neighbour-median")
     cmd.set_defaults(handler=_report)
+
+    group = commands.add_parser("memory", help="check the lessons in the agents' memory")
+    tasks = group.add_subparsers(required=True)
+    default_dir = Path.home() / ".claude" / "agent-memory"
+    cmd = tasks.add_parser(
+        "lint", help="undated, sourceless and expired lessons, dead paths, files over the cap"
+    )
+    cmd.add_argument("--dir", type=Path, default=default_dir, help="one directory per agent")
+    cmd.set_defaults(handler=_memory_lint)
+    cmd = tasks.add_parser("prune", help="remove expired lessons (a dry run without --apply)")
+    cmd.add_argument("--dir", type=Path, default=default_dir, help="one directory per agent")
+    cmd.add_argument("--expired", action="store_true", required=True)
+    cmd.add_argument("--apply", action="store_true", help="rewrite the files")
+    cmd.set_defaults(handler=_memory_prune)
     return parser
 
 
@@ -131,4 +148,17 @@ def _report(args: argparse.Namespace) -> int:
     if not runs:
         raise ValueError(f"No results in {args.directory}")
     print(report(runs, baseline=args.baseline), end="")
+    return 0
+
+
+def _memory_lint(args: argparse.Namespace) -> int:
+    root = args.dir.expanduser()
+    settings = memory.load_settings()
+    results = memory.lint(root, settings, date.today())
+    print(memory.render_lint(results, root, settings), end="")
+    return 1 if memory.has_findings(results) else 0
+
+
+def _memory_prune(args: argparse.Namespace) -> int:
+    print(memory.prune(args.dir.expanduser(), date.today(), apply=args.apply), end="")
     return 0

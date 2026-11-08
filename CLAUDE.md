@@ -13,6 +13,9 @@ Python package that backtests its estimator.
 - `hooks/`: standard-library Python scripts called by `hooks/hooks.json`. Keep them free of
   third-party imports, they run with the user's `python3`.
 - `src/agent_harness/`: the backtest (`harness-eval`). Reads a ticket-precedent index.
+  `memory.py` (`harness-eval memory`) parses memory lessons like
+  `hooks/guard_memory_writes.py`, which cannot import it; `tests/test_memory.py` keeps
+  the two in step.
 - `results/`: published aggregate reports. `runs/` holds per-ticket results and is ignored.
 
 ## Rules

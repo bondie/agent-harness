@@ -66,5 +66,10 @@ fact per line with the repository it applies to:
   need (a running stack, fixtures).
 - **Review skill:** the name of the codebase's review skill, when the person has one.
 
+Write each note as one bullet that ends with its source and date: `- <note> (source:
+<KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])`; a hook denies a new bullet without
+them and a file over its size cap. Never record a path in a temporary directory (a scratchpad,
+`/tmp`): it is gone by the next run, so record how to rebuild what was there.
+
 You write nothing else: a hook denies writes outside your memory directory. Never store
 secrets, ticket text or customer data.

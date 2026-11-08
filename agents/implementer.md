@@ -53,6 +53,11 @@ repository it applies to:
   test that needs fixtures).
 - **Conventions** the reviewer or the person asked for that the code alone did not show.
 
+Write each note as one bullet that ends with its source and date: `- <note> (source:
+<KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])`; a hook denies a new bullet without
+them and a file over its size cap. Never record a path in a temporary directory (a scratchpad,
+`/tmp`): it is gone by the next run, so record how to rebuild what was there.
+
 Fix or delete a note that turns out wrong. Never store secrets, ticket text or customer data.
 
 ## Report

@@ -1,5 +1,5 @@
 {
-  "description": "Run the project's tests after the implementer edits a file and its quality gate when it finishes, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, deny subagents shell commands that destroy work, leak secrets or touch production, log every finished subagent run, and keep each agent's report and structured block per ticket.",
+  "description": "Run the project's tests after the implementer edits a file and its quality gate when it finishes, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, keep every agent's memory lessons sourced, dated and under a size cap, deny subagents shell commands that destroy work, leak secrets or touch production, log every finished subagent run, and keep each agent's report and structured block per ticket.",
   "hooks": {
     "PreToolUse": [
       {

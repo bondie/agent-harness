@@ -1,14 +1,15 @@
 ---
 name: retro
-description: After a ticket is done, compare the estimate and the plan with what actually happened and have each agent of the team record its lessons in its memory, so the next estimate, plan, implementation and review get better. Use when the person asks for a retro or a lessons-learned pass on a ticket, e.g. "/agent-harness:retro SHOP-412", or when the ticket playbook offers it at the end.
+description: After a ticket is done, compare the estimate and the plan with what actually happened, have each agent of the team propose lessons for its memory and write only the ones the person approves, so the next estimate, plan, implementation and review get better. Use when the person asks for a retro or a lessons-learned pass on a ticket, e.g. "/agent-harness:retro SHOP-412", or when the ticket playbook offers it at the end.
 ---
 
 # Retro: teach the team from one finished ticket
 
 You are the team lead. The agents learn only through their memory, and only from facts. Your
-job is to collect the facts, give each agent the ones that concern it, and let it update its
-own memory. Ticket key: the argument (ask for it if missing). Run it when the work is done and
-its time is logged; a retro on half-logged time teaches the estimator the wrong numbers.
+job is to collect the facts, give each agent the ones that concern it, and let the person
+decide what each agent keeps. Ticket key: the argument (ask for it if missing). Run it when the
+work is done and its time is logged; a retro on half-logged time teaches the estimator the
+wrong numbers.
 
 ## 1. Collect the facts
 
@@ -34,11 +35,13 @@ from the conversation only what is missing there.
 
 Use numbers, not impressions. When a fact is missing, say so instead of guessing.
 
-## 2. Tell each agent what concerns it
+## 2. Have each agent propose its lessons
 
-Run the agents in parallel, each with a short task: "Retro for <KEY>. Update your memory with
-the following, then reply with the lines you added or changed." Send only what concerns that
-agent, and skip an agent with nothing new:
+Run the agents in parallel, each with a short task: "Retro for <KEY>. Do not write to your
+memory yet. From the following, propose the lines to add, each as `- <lesson> (source: <KEY>,
+<today>[, expires YYYY-MM-DD])`, and the existing lines to change or delete." Use `retro` as
+the source for a lesson that outgrows the ticket, and an expiry for one tied to a version, a
+release or an incident. Send only what concerns that agent, and skip an agent with nothing new:
 
 - **estimator:** a calibration row (repositories, files, lines with tests, the person's hours),
   the estimate against the actual time, and which part was off and why.
@@ -47,8 +50,22 @@ agent, and skip an agent with nothing new:
 - **reviewer-qa:** the findings the person rejected and why, and the defects that got through
   the review.
 
-## 3. Report
+## 3. Let the person decide
+
+Show the person the proposed lines per agent, numbered, so that they can approve, edit or
+reject each one briefly. Nothing goes into memory before that: a wrong lesson misleads every
+later run, and a remembered rejection can hide the next real finding.
+
+## 4. Write the approved lines
+
+Send each agent with approved lines one task: "Write these approved lines to your memory
+exactly as given, and make these approved changes and deletions: …". A hook denies a memory
+line without a source and a date, and a file over its size cap; a compaction that the cap
+asks for goes through the person like any other line.
+
+## 5. Report
 
 Show the person, briefly: the estimate against the actual time, the biggest lesson per agent,
-and the memory lines each agent added. A retro stays local: never write it to the tracker
-unless the person asks for it.
+and the lines each agent wrote. Every few retros, run `harness-eval memory lint` (README,
+"Memory hygiene"): it lists undated and expired lessons, dead paths and files over the cap.
+A retro stays local: never write it to the tracker unless the person asks for it.
