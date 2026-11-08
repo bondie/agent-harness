@@ -5,6 +5,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -160,62 +161,62 @@ def test_safe_git_commands_are_allowed(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "rm -rf build",
-        "rm -r build",
-        "rm -fr build",
-        "rm -R build",
-        "rm --recursive build",
-        "rm build -rf",
+        "rm -rf src",
+        "rm -r src",
+        "rm -fr src",
+        "rm -R src",
+        "rm --recursive src",
+        "rm src -rf",
         "rm -rf /",
         "rm -rf ~",
         "rm -rf ~/projects",
         "rm -rf ~other/projects",
         "rm -rf $HOME/projects",
         'rm -rf "$DIR"',
-        "rm -rf $(pwd)/build",
+        "rm -rf $(pwd)/src",
         "rm -rf /tmp/claude-501",
         "rm -rf /tmp/claude-*",
         f"rm -rf {SCRATCH}/../../../../etc",
         "rm -rf /sandbox/tmp",
-        f"rm -rf {SCRATCH}/x build",
-        f"cd {SCRATCH}/x; rm -rf build",
-        f"cd {SCRATCH}/x || rm -rf build",
-        f"cd {SCRATCH}/x && ls || rm -rf build",
-        f"(cd {SCRATCH}/x && ls); rm -rf build",
-        "cd - && rm -rf build",
-        "bash -c 'rm -rf build'",
-        'sh -c "rm -rf build"',
+        f"rm -rf {SCRATCH}/x src",
+        f"cd {SCRATCH}/x; rm -rf src",
+        f"cd {SCRATCH}/x || rm -rf src",
+        f"cd {SCRATCH}/x && ls || rm -rf src",
+        f"(cd {SCRATCH}/x && ls); rm -rf src",
+        "cd - && rm -rf src",
+        "bash -c 'rm -rf src'",
+        'sh -c "rm -rf src"',
         "bash -lc 'cd / && rm -rf usr'",
-        "bash -c \"bash -c 'rm -rf build'\"",
-        "zsh -c 'rm -rf build'",
+        "bash -c \"bash -c 'rm -rf src'\"",
+        "zsh -c 'rm -rf src'",
         "sudo rm -rf /var/lib/app",
         "sudo -u root /bin/rm -rf /var/lib/app",
-        "env FOO=1 rm -rf build",
-        "FOO=1 BAR=2 rm -rf build",
-        "\\rm -rf build",
-        "'rm' -rf build",
-        'r"m" -rf build',
-        "$'\\x72m' -rf build",
-        "nohup rm -rf build &",
-        "timeout 5 rm -rf build",
-        "nice -n 10 rm -rf build",
-        "ls; rm -rf build",
-        "ls && rm -rf build",
-        "ls\nrm -rf build",
-        "ls|rm -rf build",
-        'echo "$(rm -rf build)"',
-        "echo `rm -rf build`",
-        "eval 'rm -rf build'",
-        "bash <<'EOF'\nrm -rf build\nEOF",
-        "bash -s <<< 'rm -rf build'",
-        "if true; then rm -rf build; fi",
-        "{ rm -rf build; }",
+        "env FOO=1 rm -rf src",
+        "FOO=1 BAR=2 rm -rf src",
+        "\\rm -rf src",
+        "'rm' -rf src",
+        'r"m" -rf src',
+        "$'\\x72m' -rf src",
+        "nohup rm -rf src &",
+        "timeout 5 rm -rf src",
+        "nice -n 10 rm -rf src",
+        "ls; rm -rf src",
+        "ls && rm -rf src",
+        "ls\nrm -rf src",
+        "ls|rm -rf src",
+        'echo "$(rm -rf src)"',
+        "echo `rm -rf src`",
+        "eval 'rm -rf src'",
+        "bash <<'EOF'\nrm -rf src\nEOF",
+        "bash -s <<< 'rm -rf src'",
+        "if true; then rm -rf src; fi",
+        "{ rm -rf src; }",
         "for d in a b; do rm -rf $d; done",
         "xargs rm -rf < dirs.txt",
         "find . -name '*.pyc' | xargs rm -rf",
         "find . -name node_modules | xargs -I{} rm -rf {}",
         "find . -delete",
-        "find build -type f -delete",
+        "find src -type f -delete",
         "find . -name x -exec rm -rf {} +",
         "find . -name '*.log' -exec /bin/rm {} \\;",
         "find -L . -name x -delete",
@@ -281,7 +282,13 @@ def test_recursive_delete_inside_the_allowed_dirs_is_allowed(command):
         "cat ~/.npmrc",
         "cat .pypirc",
         "cat ~/.netrc",
-        "cat aws_credentials",
+        "cat ~/.aws/credentials",
+        "cat credentials",
+        "cat config/credentials.json",
+        "cat config/app-credentials.yaml",
+        "cat deploy.credentials",
+        "cat Credentials.JSON",
+        "cat .ENV",
         "cat config/auth.json",
         "cat < .env",
         "cat .env | head",
@@ -441,17 +448,17 @@ def nested_shells(levels: int, command: str) -> str:
 
 def test_shells_nested_too_deep_to_check_are_denied():
     assert rule(nested_shells(guard_shell.MAX_DEPTH, "ls")) is None
-    assert rule(nested_shells(guard_shell.MAX_DEPTH, "rm -rf build")) == "rm-outside-allowed-dirs"
+    assert rule(nested_shells(guard_shell.MAX_DEPTH, "rm -rf src")) == "rm-outside-allowed-dirs"
     assert rule(nested_shells(guard_shell.MAX_DEPTH + 1, "ls")) == "nesting"
 
 
 def test_the_main_agent_is_not_checked_by_default():
-    assert rule("rm -rf build", agent=None) is None
+    assert rule("rm -rf src", agent=None) is None
 
 
 def test_scope_all_checks_the_main_agent_too(tmp_path):
     home = guard_config(tmp_path, {"scope": "all"})
-    assert rule("rm -rf build", agent=None, HARNESS_HOME=home) == "rm-outside-allowed-dirs"
+    assert rule("rm -rf src", agent=None, HARNESS_HOME=home) == "rm-outside-allowed-dirs"
 
 
 def test_other_tools_are_not_checked():
@@ -465,16 +472,166 @@ def test_every_deny_reason_names_the_rule_and_a_way_forward(tmp_path):
         "force-push": "git push --force",
         "force-with-lease": "git push --force-with-lease",
         "git-discard": "git reset --hard",
-        "rm-outside-allowed-dirs": "rm -rf build",
+        "rm-outside-allowed-dirs": "rm -rf src",
         "secret-read": "cat .env",
         "prod-db": "psql -h db-prod-1",
         "destructive-sql": "mysql -e 'DROP TABLE orders'",
+        "push-delete": "git push --delete origin feature",
+        "unparsable": "echo $(ls",
     }
     for expected, command in commands.items():
         reason = decide(command, HARNESS_HOME=home)
         assert reason is not None
         assert reason.startswith(f"agent-harness guard, rule {expected}: ")
         assert re.fullmatch(r".+\. To proceed: [a-z].+\.", reason.split(": ", 1)[1]), reason
+
+
+COMMIT = "git commit -m \"$(cat <<'EOF'\nfix: don't crash\n\nKeep it (open\nEOF\n)\""
+PR_BODY = "gh pr create --title x --body \"$(cat <<'EOF'\nIt's done.\nEOF\n)\""
+
+
+@pytest.mark.parametrize("message", [COMMIT, PR_BODY])
+def test_an_apostrophe_in_a_heredoc_inside_a_substitution_hides_nothing(message):
+    assert rule(message) is None
+    assert rule(message + " && git push --force") == "force-push"
+    assert rule(message + "; rm -rf src") == "rm-outside-allowed-dirs"
+    assert rule(message.replace("EOF\n)", "EOF\n) $(rm -rf src)")) == "rm-outside-allowed-dirs"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo $(ls",
+        'echo "$(ls"',
+        "git commit -m \"$(cat <<'EOF'\nfix: it's\nEOF\n\" && git push --force",
+        "echo $(cat <<'EOF'\nno end\n)",
+    ],
+)
+def test_a_substitution_that_never_closes_is_denied(command):
+    assert rule(command) == "unparsable"
+
+
+def test_a_comment_inside_a_substitution_is_skipped():
+    assert rule("x=$(ls # don't\n); rm -rf src") == "rm-outside-allowed-dirs"
+    assert rule("x=$(ls # don't\n)") is None
+
+
+def test_many_cd_steps_stay_fast_and_count_as_unknown_past_the_cap():
+    pairs = "".join(f"cd pkg{i}; npm test; cd ..; " for i in range(50))
+    started = time.monotonic()
+    assert rule(pairs + "ls") is None
+    assert rule(pairs + "rm -rf src") == "rm-outside-allowed-dirs"
+    assert rule(pairs + f"rm -rf {SCRATCH}/x") is None
+    assert time.monotonic() - started < 1
+    either = "".join(f"cd /work/r{i} || cd /work/s{i}; " for i in range(40))
+    assert rule(either + "git reset --hard") == "git-discard"
+    assert len(guard_shell.capped([f"/d{i}" for i in range(guard_shell.MAX_DIRS)])) == 16
+    assert guard_shell.capped([f"/d{i}" for i in range(guard_shell.MAX_DIRS + 1)]) == [None]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf node_modules",
+        "rm -rf ./node_modules packages/app/node_modules",
+        "rm -rf var/cache/dev",
+        "rm -rf build dist coverage",
+        "rm -rf .pytest_cache .mypy_cache .ruff_cache",
+        "find . -name __pycache__ -prune -o -print | head",
+        "rm -rf src/shop/__pycache__",
+        "rm -rf /work/shop/build",
+        "cd src && rm -rf __pycache__",
+    ],
+)
+def test_build_output_and_caches_in_the_project_may_be_deleted(command):
+    assert rule(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /",
+        "rm -rf ~",
+        "rm -rf .",
+        "rm -rf /work/shop",
+        "rm -rf ../shop",
+        "rm -rf ../other/node_modules",
+        "rm -rf /work/other/build",
+        "rm -rf /node_modules",
+        "rm -rf node_modules/../src",
+        "cd .. && rm -rf build",
+    ],
+)
+def test_the_default_dirs_allow_nothing_outside_them(command):
+    reason = decide(command)
+    assert reason is not None
+    assert "`allowed_rm_dirs`" in reason
+
+
+def test_without_a_project_the_default_dirs_allow_nothing():
+    event = {"tool_name": "Bash", "agent_type": SUBAGENT}
+    verdict = guard_shell.decision({**event, "tool_input": {"command": "rm -rf build"}}, ENV)
+    assert verdict is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat credentials.py",
+        "cat tests/test_credentials.py",
+        "grep -rn password src/credentials_service.py",
+        "sed -n 1,20p app/Security/CredentialsProvider.php",
+        "cat docs/credentials.md",
+    ],
+)
+def test_source_files_named_after_credentials_are_not_secrets(command):
+    assert rule(command) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("git checkout -f", "git-discard"),
+        ("git checkout -f main", "git-discard"),
+        ("git checkout --force feature", "git-discard"),
+        ("git checkout -b fix main", None),
+        ("git push --delete origin feature", "push-delete"),
+        ("git push -d origin v1.0", "push-delete"),
+        ("git push origin :feature", "push-delete"),
+        ("git push origin :refs/tags/v1", "push-delete"),
+        ("git push --mirror", "push-delete"),
+        ("git push --prune origin", "push-delete"),
+        ("git push origin feature:feature", None),
+        ("git push -o ci.skip origin main", None),
+        ('echo "DROP TABLE orders" | mysql shop', "destructive-sql"),
+        ("printf 'truncate orders;' | psql", "destructive-sql"),
+        ("cat <<'SQL' | mysql\nDROP TABLE orders;\nSQL", "destructive-sql"),
+        ('echo "SELECT 1" | mysql shop', None),
+        ("echo 'DROP TABLE orders' | grep DROP", None),
+        ("rg TOKEN .env", "secret-read"),
+        ("rg -e TOKEN .env", "secret-read"),
+        ("rg -l TOKEN .env", None),
+        ("rg TOKEN src", None),
+        ("bat .env", "secret-read"),
+        ("nl .env", "secret-read"),
+        ("tac .env", "secret-read"),
+        ("jq . auth.json", "secret-read"),
+        ("jq -r .token auth.json", "secret-read"),
+        ("jq -n --rawfile t .env '$t'", "secret-read"),
+        ("jq . package.json", None),
+        ("git show HEAD:.env", "secret-read"),
+        ("git show main~2:config/auth.json", "secret-read"),
+        ("git show HEAD -- .env", "secret-read"),
+        ("git log -p -- .env", "secret-read"),
+        ("git log --patch .env", "secret-read"),
+        ("git show HEAD:README.md", None),
+        ("git show HEAD:.env | wc -l", None),
+        ("git log -- .env", None),
+        ("git log --oneline -p -- src", None),
+    ],
+)
+def test_more_ways_to_lose_work_or_leak_secrets(command, expected):
+    assert rule(command) == expected
 
 
 def guard_config(tmp_path: Path, settings: Any, name: str = "guard.json") -> str:
@@ -553,7 +710,7 @@ def test_invalid_config_falls_back_to_the_defaults_with_a_warning(tmp_path, sett
 @pytest.mark.parametrize("data", ["{not json", '["guard"]', '{"guard": "all"}'])
 def test_an_invalid_project_config_is_reported(tmp_path, data):
     project = project_config(tmp_path, data)
-    reason = decide("rm -rf build", CLAUDE_PROJECT_DIR=str(project))
+    reason = decide("rm -rf src", CLAUDE_PROJECT_DIR=str(project))
     assert reason is not None
     assert "Guard config warnings: " in reason
 

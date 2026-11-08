@@ -5,11 +5,13 @@ For the analyst, the estimator, the implementer and the reviewer it writes, unde
 `$HARNESS_HOME/tickets/<KEY>/` (default `~/.claude/agent-harness/tickets/<KEY>/`), the final
 report as `<agent>.<NN>.md`, one line per run in `index.jsonl`, and every fenced
 `json harness-<kind>` block as `<kind>.json`, moving the previous one to `<kind>.<NN>.json`.
-The key is HARNESS_TICKET, else the first ticket key in the task prompt, else
-`adhoc-<YYYYMMDD>-<short agent id>`. A stop that a hook blocked does not end the run, so the
-next stop of that agent replaces its report and index line. The retro, the evals and the
-metrics read these files instead of the conversation. Standard library only, and it never
-blocks the session.
+The key is HARNESS_TICKET, else the `ticket` of the report's own structured block, else the
+first ticket key in the task prompt whose prefix is not in NOT_TICKET_PREFIXES (`UTF-8`,
+`SHA-256`), else `adhoc-<YYYYMMDD>-<short agent id>`. A stop that a hook blocked does not end
+the run, so the next stop of that agent replaces its report and index line. A retro run (task
+starting "Retro for") is not saved, so it cannot overwrite the ticket's artifacts. The retro,
+the evals and the metrics read these files instead of the conversation. Standard library
+only; it never blocks the session and tells the person when it cannot write the files.
 """
 
 from __future__ import annotations
@@ -37,6 +39,23 @@ BLOCK = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 SAFE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+# Standards and encodings shaped like ticket keys; src/agent_harness/artifacts.py keeps the same.
+NOT_TICKET_PREFIXES = (
+    "UTF",
+    "ISO",
+    "PSR",
+    "SHA",
+    "RFC",
+    "CVE",
+    "HTTP",
+    "TLS",
+    "X",
+    "ECMA",
+    "IEEE",
+    "UTC",
+    "GMT",
+)
+RETRO = "retro for"
 
 
 class Block(NamedTuple):
@@ -96,6 +115,14 @@ def task_prompt(entries: list[dict[str, Any]]) -> str:
     return ""
 
 
+def is_retro(entries: list[dict[str, Any]]) -> bool:
+    return task_prompt(entries).lstrip().lower().startswith(RETRO)
+
+
+def is_ticket(text: str) -> bool:
+    return TICKET.fullmatch(text) is not None and text.split("-")[0] not in NOT_TICKET_PREFIXES
+
+
 def run_started(entries: list[dict[str, Any]]) -> datetime:
     for entry in entries:
         stamp = entry.get("timestamp")
@@ -109,14 +136,21 @@ def run_started(entries: list[dict[str, Any]]) -> datetime:
 
 
 def ticket_key(
-    event: dict[str, Any], entries: list[dict[str, Any]], environ: Mapping[str, str]
+    event: dict[str, Any],
+    entries: list[dict[str, Any]],
+    environ: Mapping[str, str],
+    report: str = "",
 ) -> str:
     override = environ.get("HARNESS_TICKET", "").strip()
     if SAFE_KEY.fullmatch(override):
         return override
-    found = TICKET.search(task_prompt(entries))
-    if found:
-        return found.group(0)
+    for block in structured_blocks(report):
+        stated = (block.value or {}).get("ticket")
+        if isinstance(stated, str) and is_ticket(stated.strip()):
+            return stated.strip()
+    for found in TICKET.finditer(task_prompt(entries)):
+        if is_ticket(found.group(0)):
+            return found.group(0)
     short = re.sub(r"[^A-Za-z0-9]", "", str(event.get("agent_id") or ""))[:8] or "unknown"
     return f"adhoc-{run_started(entries):%Y%m%d}-{short}"
 
@@ -168,6 +202,17 @@ def structured_blocks(report: str) -> list[Block]:
             continue
         blocks.append(Block(kind, value, ""))
     return blocks
+
+
+def unwritable(directory: Path) -> str | None:
+    """Why nothing can be recorded in `directory`, or None when it can."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / ".lock").open("a"):
+            pass
+    except OSError as error:
+        return f"{directory} is not writable ({error.strerror or error})"
+    return None
 
 
 @contextmanager
@@ -267,7 +312,11 @@ def save(directory: Path, agent: str, event: dict[str, Any], report: str) -> Non
         partial.replace(index)
 
 
-def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> int:
+def main(
+    stdin: TextIO = sys.stdin,
+    environ: Mapping[str, str] = os.environ,
+    stdout: TextIO = sys.stdout,
+) -> int:
     try:
         event = json.load(stdin)
         if not isinstance(event, dict):
@@ -277,9 +326,15 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
             return 0
         entries = read_transcript(event.get("agent_transcript_path"))
         report = final_report(entries, event)
-        if not report.strip():
+        if not report.strip() or is_retro(entries):
             return 0
-        directory = harness_home(environ) / "tickets" / ticket_key(event, entries, environ)
+        directory = harness_home(environ) / "tickets" / ticket_key(event, entries, environ, report)
+        problem = unwritable(directory)
+        if problem:
+            message = f"agent-harness could not save the {agent} report: {problem}."
+            json.dump({"systemMessage": message}, stdout)
+            print(f"save_artifacts: {problem}", file=sys.stderr)
+            return 0
         save(directory, agent, event, report)
     except Exception as error:
         print(f"save_artifacts: {error}", file=sys.stderr)

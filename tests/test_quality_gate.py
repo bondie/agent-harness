@@ -149,7 +149,8 @@ def test_files_are_quoted_and_filtered_by_match(tmp_path, check):
 def test_the_implementation_block_names_the_files(tmp_path, check):
     repo = git_repository(tmp_path / "shop")
     platform = git_repository(tmp_path / "platform")
-    configure(repo, [{"cmd": check("shop"), "match": r"\.py$"}])
+    shop = [{"cmd": check("shop"), "match": r"\.py$"}]
+    configure(repo, {"commands": shop, "repositories": ["../platform"]})
     configure(platform, [{"cmd": check("platform")}])
     touch(repo, "src/a.py", "src/b.py", "src/server/c.py")
     touch(platform, "lib/feed.py")
@@ -245,7 +246,9 @@ def test_another_repository_uses_its_own_settings_not_the_session_env(tmp_path, 
         platform, "settings.local.json", HARNESS_GATE_COMMANDS=json.dumps([{"cmd": check("own")}])
     )
     report = fenced("implementation", {"files": [str(platform / "lib/feed.py")]})
-    session_env = json.dumps([{"cmd": check("session", 1)}])
+    session_env = json.dumps(
+        {"commands": [{"cmd": check("session", 1)}], "repositories": [str(platform)]}
+    )
 
     answer = gate(tmp_path, finished(tmp_path, project, report), HARNESS_GATE_COMMANDS=session_env)
 
@@ -421,15 +424,15 @@ def test_a_handback_let_through_after_the_limit_is_not_blocked_at_stop(tmp_path,
     assert gates(tmp_path)["blocks"] == 2
 
 
-def test_the_handback_path_denies_at_most_three_times(tmp_path, check):
+def test_the_handback_path_denies_at_most_twice(tmp_path, check):
     repo = git_repository(tmp_path / "shop")
     configure(repo, {"commands": [{"cmd": check("lint", 1)}], "max_blocks": 5})
     touch(repo, "src/shop.py")
 
-    answers = [gate(tmp_path, handing_back(tmp_path, repo)) for _ in range(4)]
+    answers = [gate(tmp_path, handing_back(tmp_path, repo)) for _ in range(3)]
 
-    assert [denied(answer) is not None for answer in answers] == [True, True, True, False]
-    assert "block 3 of at most 3" in (denied(answers[2]) or "")
+    assert [denied(answer) is not None for answer in answers] == [True, True, False]
+    assert "block 2 of at most 2" in (denied(answers[1]) or "")
 
 
 def test_a_count_written_by_an_older_version_still_counts(tmp_path, check):
@@ -522,3 +525,124 @@ def test_the_example_configuration_is_usable():
         assert re.compile(command["match"])
         assert command["cmd"].strip()
     assert gate["timeout"] > 0
+
+
+def test_another_hook_continuing_the_run_does_not_reopen_the_count(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint", 1)}])
+    touch(repo, "src/shop.py")
+
+    answers = [
+        gate(tmp_path, finished(tmp_path, repo, stop_hook_active=active))
+        for active in (False, True, True, True)
+    ]
+
+    assert [(answer or {}).get("decision") for answer in answers] == ["block", "block", None, None]
+    assert (answers[3] or {})["systemMessage"].startswith("The quality gate still fails")
+    assert gates(tmp_path)["blocks"] == 2
+
+
+def test_a_background_child_holding_the_output_does_not_time_the_check_out(tmp_path):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, {"commands": [{"cmd": "(sleep 8 &); echo ok"}], "timeout": 3})
+    touch(repo, "src/shop.py")
+    started = time.monotonic()
+
+    assert gate(tmp_path, finished(tmp_path, repo)) is None
+
+    assert time.monotonic() - started < 3
+    [command] = gates(tmp_path)["commands"]
+    assert (command["exit"], command["output_tail"]) == (0, "ok")
+
+
+def test_an_unwritable_home_skips_the_gate_and_says_so(tmp_path):
+    repo = git_repository(tmp_path / "shop")
+    marker = tmp_path / "ran"
+    configure(repo, [{"cmd": f"touch {marker}; exit 1"}])
+    touch(repo, "src/shop.py")
+    (tmp_path / "home").write_text("a file, not a directory")
+
+    for event in (finished(tmp_path, repo), handing_back(tmp_path, repo)):
+        answer = gate(tmp_path, event)
+        assert answer is not None
+        assert set(answer) == {"systemMessage"}
+        assert "did not run the quality gate" in answer["systemMessage"]
+    assert not marker.exists()
+
+
+def test_a_repository_outside_the_session_is_not_trusted(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    other = git_repository(tmp_path / "other")
+    marker = tmp_path / "ran"
+    configure(repo, [{"cmd": check("shop")}])
+    configure(other, [{"cmd": f"touch {marker}"}])
+    write_settings(
+        other, "settings.local.json", HARNESS_GATE_COMMANDS=f'[{{"cmd": "touch {marker}"}}]'
+    )
+    touch(repo, "src/a.py")
+    touch(other, "lib/b.py")
+    report = fenced("implementation", {"files": ["src/a.py", str(other / "lib/b.py")]})
+
+    answer = gate(tmp_path, finished(tmp_path, repo, report))
+
+    assert not marker.exists()
+    assert answer is not None
+    assert "did not check lib/b.py in " in answer["systemMessage"]
+    assert "gate.repositories" in answer["systemMessage"]
+    result = gates(tmp_path)
+    assert [command["output_tail"] for command in result["commands"]] == [
+        f'shop {repo} ["src/a.py"]'
+    ]
+    assert result["skipped"] == [{"repo": str(other), "files": ["lib/b.py"]}]
+
+
+def test_an_untrusted_repository_alone_runs_nothing(tmp_path):
+    repo = git_repository(tmp_path / "shop")
+    other = git_repository(tmp_path / "other")
+    marker = tmp_path / "ran"
+    configure(other, [{"cmd": f"touch {marker}"}])
+    touch(other, "lib/b.py")
+    report = fenced("implementation", {"files": [str(other / "lib/b.py")]})
+
+    assert gate(tmp_path, finished(tmp_path, other, report), project=repo) is None
+    assert not marker.exists()
+    assert not (tmp_path / "home").exists()
+
+
+def retro(tmp_path: Path, event: dict[str, Any]) -> dict[str, Any]:
+    path = transcript(tmp_path, user("retro for SHOP-412. Do not write yet."), name="agent-i1")
+    return {**event, "agent_transcript_path": str(path)}
+
+
+def test_a_retro_run_is_not_gated(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint", 1)}])
+    touch(repo, "src/shop.py")
+
+    assert gate(tmp_path, retro(tmp_path, finished(tmp_path, repo))) is None
+    assert gate(tmp_path, retro(tmp_path, handing_back(tmp_path, repo))) is None
+    assert not (tmp_path / "home").exists()
+
+
+@pytest.mark.parametrize(
+    ("prompt", "block", "key"),
+    [
+        ("Fix the UTF-8 export for SHOP-412", {}, "SHOP-412"),
+        ("Follow PSR-12 and SHA-256 in SHOP-412", {}, "SHOP-412"),
+        ("Implement SHOP-412", {"ticket": "SHOP-77"}, "SHOP-77"),
+        ("Implement SHOP-412", {"ticket": "ISO-8601"}, "SHOP-412"),
+        ("Implement SHOP-412", {"ticket": "not a key"}, "SHOP-412"),
+    ],
+)
+def test_the_ticket_skips_standards_and_prefers_the_block(tmp_path, check, prompt, block, key):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint")}])
+    touch(repo, "src/shop.py")
+    report = "Done.\n\n" + fenced("implementation", {**block, "files": ["src/shop.py"]})
+    event = finished(tmp_path, repo, report)
+    event["agent_transcript_path"] = str(
+        transcript(tmp_path, user(prompt), said(report), name="agent-i1")
+    )
+
+    assert gate(tmp_path, event) is None
+    assert [path.name for path in (tmp_path / "home/tickets").iterdir()] == [key]

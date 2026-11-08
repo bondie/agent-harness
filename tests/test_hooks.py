@@ -908,17 +908,53 @@ def test_an_invalid_estimate_goes_back_to_the_estimator(tmp_path, report, expect
 
 
 def test_the_estimator_is_sent_back_at_most_twice(tmp_path):
-    invalid = estimator_stop(tmp_path, estimate_report(total=3))
-    verdicts = [check_estimate(tmp_path, invalid) for _ in range(3)]
+    report = estimate_report(total=3)
+    verdicts = [
+        check_estimate(tmp_path, estimator_stop(tmp_path, report, stop_hook_active=active))
+        for active in (False, True, True, True)
+    ]
 
     assert [v["decision"] for v in verdicts[:2] if v] == ["block", "block"]
-    last = verdicts[2]
-    assert last is not None
-    assert "decision" not in last
-    assert "after 2 retries" in last["systemMessage"]
-    assert "Set total to 2" in last["systemMessage"]
+    for last in verdicts[2:]:
+        assert last is not None
+        assert "decision" not in last
+        assert "after 2 retries" in last["systemMessage"]
+        assert "Set total to 2" in last["systemMessage"]
     record = json.loads((tmp_path / "home" / "estimate-check" / "s1-a1.json").read_text())
     assert record["blocks"] == 2
+
+    resumed = check_estimate(tmp_path, estimator_stop(tmp_path, report))
+    assert resumed is not None
+    assert resumed["decision"] == "block"
+
+
+def test_a_retro_run_of_the_estimator_is_not_checked(tmp_path):
+    path = tmp_path / "subagents" / "agent-a1.jsonl"
+    path.parent.mkdir()
+    entries = [
+        {"type": "user", "isMeta": True, "message": {"content": "Estimate SHOP-1"}},
+        {"type": "user", "message": {"content": [{"type": "text", "text": "Retro for SHOP-412."}]}},
+    ]
+    path.write_text("\n".join(map(json.dumps, entries)) + "\n")
+    invalid = estimate_report(total=3)
+    stop = estimator_stop(tmp_path, invalid, agent_transcript_path=str(path))
+    handing = {**estimator_handback(invalid), "transcript_path": f"{tmp_path}.jsonl"}
+
+    assert check_estimate(tmp_path, stop) is None
+    assert check_estimate(tmp_path, handing) is None
+    assert not (tmp_path / "home").exists()
+
+
+def test_an_unwritable_home_lets_the_estimate_through_and_says_so(tmp_path):
+    (tmp_path / "home").write_text("a file, not a directory")
+    invalid = estimate_report(total=3)
+
+    for event in (estimator_stop(tmp_path, invalid), estimator_handback(invalid)):
+        verdict = check_estimate(tmp_path, event)
+        assert verdict is not None
+        assert set(verdict) == {"systemMessage"}
+        assert "could not run the estimate check" in verdict["systemMessage"]
+        assert "Set total to 2" in verdict["systemMessage"]
 
 
 def test_a_fixed_estimate_clears_the_count(tmp_path):
