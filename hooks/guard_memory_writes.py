@@ -123,10 +123,16 @@ def size_kb(value: Any, default: float) -> float:
     return float(value)
 
 
+def harness_home(environ: dict[str, str]) -> Path:
+    custom = environ.get("HARNESS_HOME", "").strip()
+    if custom:
+        return Path(custom).expanduser()
+    return Path.home() / ".claude" / "agent-harness"
+
+
 def load_settings(environ: dict[str, str]) -> Settings:
-    home = environ.get("HARNESS_HOME") or str(Path.home() / ".claude" / "agent-harness")
     try:
-        raw = json.loads((Path(home) / "memory.json").read_text(encoding="utf-8"))
+        raw = json.loads((harness_home(environ) / "memory.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raw = {}
     if not isinstance(raw, dict):

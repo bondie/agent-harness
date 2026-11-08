@@ -17,14 +17,17 @@ Json = dict[str, Any]
 TICKET = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
 SAFE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 BLOCK = re.compile(
-    r"^```json harness-(?P<kind>[a-z]+)[ \t]*\n(?P<body>.*?)^```", re.MULTILINE | re.DOTALL
+    r"^[ \t]*```json[ \t]+harness-(?P<kind>[a-z][a-z0-9-]*)[ \t]*\r?\n"
+    r"(?P<body>.*?)^[ \t]*```[ \t]*$",
+    re.MULTILINE | re.DOTALL,
 )
+RESERVED_KINDS = {"gates", "escaped", "outcome"}
 DISPOSITIONS = ("accepted", "rejected", "deferred")
 SOURCES = ("sentry", "incident-scout", "manual")
 
 
 def harness_home() -> Path:
-    custom = os.environ.get("HARNESS_HOME")
+    custom = os.environ.get("HARNESS_HOME", "").strip()
     return Path(custom).expanduser() if custom else Path.home() / ".claude" / "agent-harness"
 
 
@@ -72,15 +75,18 @@ def write_json(path: Path, data: Any) -> None:
 
 
 def report_blocks(directory: Path, kind: str) -> list[Json]:
-    """Every `json harness-<kind>` block in the agents' reports in the ticket directory."""
+    """Every `json harness-<kind>` block in the agents' reports in the ticket directory, parsed
+    like `hooks/save_artifacts.py`: the reserved kinds are the plugin's own files."""
     blocks: list[Json] = []
+    if kind in RESERVED_KINDS:
+        return blocks
     for report in sorted(directory.glob("*.md")):
         for match in BLOCK.finditer(report.read_text(encoding="utf-8")):
             if match["kind"] != kind:
                 continue
             try:
                 data = json.loads(match["body"])
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(data, dict):
                 blocks.append(data)

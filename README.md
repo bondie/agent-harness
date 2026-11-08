@@ -114,6 +114,7 @@ Then, per project:
 | `<agent>.<NN>.md` | The final report of each run, numbered per agent. |
 | `<kind>.json` | The latest structured block of a kind (`analysis`, `estimate`, `review`, `implementation`); the previous one moves to `<kind>.<NN>.json`. |
 | `gates.json` | The latest quality gate result: the commands, their exit codes, durations and the last 40 lines of their output. |
+| `outcome.json`, `escaped.json` | The actual time and diff, and the defects that reached production, written by `harness-eval` ([Measuring the team](#measuring-the-team-not-just-the-estimator)). |
 
 Each agent ends its report with one fenced block whose info string is `json harness-<kind>`;
 its prompt shows the format. A stop that a hook blocked does not end a run, so the report the
@@ -214,42 +215,6 @@ The guard catches mistakes; it is not a sandbox against deliberate evasion. It d
 inside scripts a command runs (`./clean.sh`, `python -c`, `make`), commands piped into `sh`,
 or what `docker exec` and `ssh` run elsewhere, and it does not check the Read tool.
 
-## The estimator
-
-The method is in [`agents/estimator.md`](agents/estimator.md). It has two modes.
-
-**Bottom-up, when the analysis has a file-by-file implementation plan.** Each part of the
-plan is split into implementation with an AI coding agent (including review), manual
-verification and debugging, and release and rollout. Implementation is priced from a
-calibration: the implementer's own recent tickets, each with the size of its diff and the
-hours they logged. Verification is priced by the scenarios that have to be checked, not by
-lines. The reference class serves as a cross-check. This mode exists because a reference
-class matches tickets on vocabulary, not on the kind of work: for cross-cutting work without
-a real precedent it overstated the effort about three times in practice.
-
-**Reference class, otherwise:**
-
-1. Get the reference class: `effort_reference` returns the most similar tickets **whose time
-   was all logged before the ticket was created**, with their hours, median and P25–P75.
-2. Discard neighbours that only share vocabulary; open the closest ones when in doubt.
-3. Anchor on the median, then adjust only for differences it can name.
-4. Keep the P25–P75 range honest: it should contain the actual time half of the time.
-5. Prefer neighbours from after a process change (or scale older ones down).
-
-The answer is one number rounded to half an hour, with the evidence for each part: the
-calibration rows and the arithmetic, or the tickets it used. The estimator still works out a
-P25–P75 range and shows it when asked; the backtest asks for it to measure its coverage.
-
-The calibration and the corrections a person made to past estimates live in the estimator's
-[memory](https://code.claude.com/docs/en/sub-agents) (`memory: user`, so
-`~/.claude/agent-memory/agent-harness-estimator/`), outside the repository. The playbook
-collects the calibration from the tracker's worklogs and `git log --numstat` when it is
-missing. The backtest measures only the reference class mode: its tickets have no plans.
-
-It never reads the ticket's existing estimate or logged time: a model shown a number anchors
-on it ([Çalikli & Alhamed, FSE 2025](https://doi.org/10.1145/3715771)), and the person
-comparing estimates needs an independent one.
-
 ## Memory hygiene
 
 Each agent keeps its memory in `~/.claude/agent-memory/<agent>/` (`memory: user`): the index
@@ -297,6 +262,42 @@ and a container's `/app/…` are skipped that way, a container path under `/usr`
 not. `prune --expired` removes the lessons whose expiry date has come, with their continuation
 lines; without `--apply` it only lists them. The `retro` skill writes only the lines the person
 approved and suggests the lint every few retros.
+
+## The estimator
+
+The method is in [`agents/estimator.md`](agents/estimator.md). It has two modes.
+
+**Bottom-up, when the analysis has a file-by-file implementation plan.** Each part of the
+plan is split into implementation with an AI coding agent (including review), manual
+verification and debugging, and release and rollout. Implementation is priced from a
+calibration: the implementer's own recent tickets, each with the size of its diff and the
+hours they logged. Verification is priced by the scenarios that have to be checked, not by
+lines. The reference class serves as a cross-check. This mode exists because a reference
+class matches tickets on vocabulary, not on the kind of work: for cross-cutting work without
+a real precedent it overstated the effort about three times in practice.
+
+**Reference class, otherwise:**
+
+1. Get the reference class: `effort_reference` returns the most similar tickets **whose time
+   was all logged before the ticket was created**, with their hours, median and P25–P75.
+2. Discard neighbours that only share vocabulary; open the closest ones when in doubt.
+3. Anchor on the median, then adjust only for differences it can name.
+4. Keep the P25–P75 range honest: it should contain the actual time half of the time.
+5. Prefer neighbours from after a process change (or scale older ones down).
+
+The answer is one number rounded to half an hour, with the evidence for each part: the
+calibration rows and the arithmetic, or the tickets it used. The estimator still works out a
+P25–P75 range and shows it when asked; the backtest asks for it to measure its coverage.
+
+The calibration and the corrections a person made to past estimates live in the estimator's
+[memory](https://code.claude.com/docs/en/sub-agents) (`memory: user`, so
+`~/.claude/agent-memory/agent-harness-estimator/`), outside the repository. The playbook
+collects the calibration from the tracker's worklogs and `git log --numstat` when it is
+missing. The backtest measures only the reference class mode: its tickets have no plans.
+
+It never reads the ticket's existing estimate or logged time: a model shown a number anchors
+on it ([Çalikli & Alhamed, FSE 2025](https://doi.org/10.1145/3715771)), and the person
+comparing estimates needs an independent one.
 
 ## Workflows
 

@@ -74,9 +74,9 @@ with the person's explicit go-ahead for that release or deploy.
 ## 7. Retro
 
 When the work is done and its time is logged, run the `retro` skill with the key, now or in
-a later session. It compares the estimate and the plan with what happened and has each agent
-record its lessons in its memory. Offer it at the hand-over; a team that never runs it does
-not get better.
+a later session. It compares the estimate and the plan with what happened, has each agent
+propose its lessons, and writes to memory only the ones the person approves. Offer it at the
+hand-over; a team that never runs it does not get better.
 
 ## Rules
 
