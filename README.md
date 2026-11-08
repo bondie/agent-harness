@@ -194,11 +194,11 @@ denial is logged ([Guard events](#guard-events)).
 | `git-discard` | `git reset --hard`, `git clean -f`, `git checkout .`/`-- .`/`-f`, `git restore .` | in a repository inside the temp dirs; `clean -n`, `restore --staged .`, single files |
 | `branch-force-delete` | `git branch -D`, `--delete --force`, `-df` | `git branch -d`; in a repository inside the temp dirs |
 | `rm-outside-allowed-dirs` | `rm -r`/`-rf`/`-fr`/`-R`, `find -delete`/`-exec rm`, `xargs rm -r` outside the allowed dirs | below `$TMPDIR` (`/tmp` when unset) or `/tmp/claude-*`, the default build and cache dirs in the project, and `allowed_rm_dirs` |
-| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `od`, `hexdump`, `uuencode`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs`, or the file fed through `<` to any other command | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c`, `cut -d= -f1` or a `safe_filters` match, or the file fed to one of them through `<` (`wc -c < .env`); `secret_allow_globs` |
+| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `od`, `hexdump`, `uuencode`, `cut`, `sort`, `uniq`, `paste`, `rev`, `fold`, `fmt`, `pr`, `comm`, `join`, `column`, `expand`, `unexpand`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs`, the file as the `--files0-from` list of `wc` or `sort`, or the file fed through `<` to any other command | `grep -c`/`-l`/`-q`; `wc <file>`; `cut -s -d= -f1 <file>`; a pipe into `wc` (not `--files0-from`), `grep -c`, `cut -s -d= -f1` or a `safe_filters` match that `xargs` does not run, or the file fed to one of them through `<` (`wc -c < .env`); `secret_allow_globs` |
 | `secret-copy` | `cp`, `mv`, `install`, `ditto`, `scp`, `rsync` or `dd if=` with a file in `secret_globs` as a source | `cp .env.example .env`; the file as the destination; `scp -i`/`rsync -e`/`--exclude` values |
-| `env-dump` | `env` without a command, `printenv` without a name or with one that contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `PASS`, `AUTH` or `CREDENTIAL` before `_` or at its end, `export`/`export -p` | `env FOO=1 make`, `printenv HOME`; a pipe into `cut -d= -f1`, `wc` or `grep -c` |
+| `env-dump` | `env` without a command, `printenv` without a name or with one that contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `PASS`, `AUTH` or `CREDENTIAL` before `_` or at its end, `export`/`export -p` | `env FOO=1 make`, `printenv HOME`; a pipe into `cut -s -d= -f1`, `wc` or `grep -c` |
 | `keychain-read` | `security find-generic-password`, `find-internet-password`, `dump-keychain` | other `security` commands |
-| `guard-tampering` | a guard file (below) as the target of `>`/`>>`, `tee`, `sed -i`, `perl -i`, `truncate`, `chmod`, `rm`, `unlink` or `shred`, the destination of `cp`, `mv`, `ln`, `install`, `ditto`, `scp`, `rsync` or `dd of=`, the source of `mv`, or of a Write, Edit, MultiEdit or NotebookEdit; `git config core.hooksPath <dir>`, `git -c core.hooksPath=…` | reading them; the repository's own `hooks/`; a copy inside the temp dirs that is not the project |
+| `guard-tampering` | a guard file (below) as the target of `>`/`>>`, `tee`, `sed -i`, `perl -i`, `truncate`, `chmod`, `rm`, `unlink` or `shred`, the destination of `cp`, `mv`, `ln`, `install`, `ditto`, `scp`, `rsync` or `dd of=`, the source of `mv`, or of a Write, Edit, MultiEdit or NotebookEdit; `git config core.hooksPath <dir>`, `git -c core.hooksPath=…` | reading them; the repository's own `hooks/`; a copy inside the temp dirs that is not the project; the user's `settings.json` for the agent types in `tampering_allow_agents` |
 | `prod-db` | `mysql`, `mariadb`, `psql`, `mongosh`, `mongo`, `redis-cli` whose `-h`/`--host`, URI, `host=` or `PGHOST`/`MYSQL_HOST` matches `prod_db_hosts` | any host while `prod_db_hosts` is empty (the default) |
 | `destructive-sql` | `DROP DATABASE`/`TABLE`/`SCHEMA` or `TRUNCATE` in a database client's arguments or heredoc, or in the command piped into it, for any host | `SELECT TRUNCATE(x, 2)` |
 | `unparsable` | a `$(` that is never closed, so the rest of the command cannot be checked | |
@@ -209,12 +209,18 @@ path with an unknown variable or `$(…)`, or in an unknown directory, counts as
 does any relative path after more than 16 possible working directories (`cd a; …; cd b; …`).
 `/tmp/claude-501` itself is not below `/tmp/claude-*`, so it stays protected.
 
+`cut -d= -f1` alone is not a safe filter: it prints a line without `=`, such as a private key
+line or a multi-line value, whole. `-s` (`--only-delimited`) drops those lines.
+
 The guard files are `.claude/settings.json`, `.claude/settings.local.json` and
 `.claude/agent-harness.json` in any directory, everything under `.git/hooks/`, `guard.json` and
 `memory.json` in `$HARNESS_HOME`, and `settings.json` and `plugins/` in `~/.claude`
 (`$CLAUDE_CONFIG_DIR` when set), matched ignoring case. Those in `$HARNESS_HOME` and `~/.claude`
 are protected everywhere; the others may be changed inside the temp dirs, unless they belong to
-the project (`CLAUDE_PROJECT_DIR`, else the working directory).
+the project (`CLAUDE_PROJECT_DIR`, else the working directory). A guard file that is a symbolic
+link is matched by its own path as well as by the file it points to. The agent types in
+`tampering_allow_agents` may change the user's `settings.json`, and no other guard file; the
+default is Claude Code's built-in `statusline-setup`, which exists to edit that file.
 
 The settings merge built-in defaults, `~/.claude/agent-harness/guard.json` (under
 `$HARNESS_HOME` when set) and the `guard` key of the project's `.claude/agent-harness.json`.
@@ -230,6 +236,7 @@ Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the 
 | `prod_db_hosts` | none; case-insensitive regexes searched in the host |
 | `safe_filters` | none; regexes searched in the pipe stage right after the read, or in the command the file is fed to through `<`, its words joined by single spaces without quotes (`grep -v -E 'a\|b'` becomes `grep -v -E a\|b`) |
 | `extra_deny` | none; `{"pattern": "<regex searched in the whole command>", "reason": "<text>"}` |
+| `tampering_allow_agents` | `"statusline-setup"`; agent types, matched on the whole `agent_type`, that may change the user's `settings.json` in `~/.claude` (`$CLAUDE_CONFIG_DIR` when set) |
 
 A glob without `/` matches the file name, one with `/` the path at any depth, both ignoring
 case. An invalid file or key is ignored and named in the next deny reason; a `runaway` object
@@ -258,7 +265,7 @@ stderr. Example ([`examples/agent-harness.json`](examples/agent-harness.json)):
 The guard catches mistakes; it is not a sandbox against deliberate evasion. It does not see
 inside scripts a command runs (`./clean.sh`, `python -c`, `make`), commands piped into `sh`,
 what `docker exec` and `ssh` run elsewhere, SQL in a file fed to a client (`mysql < x.sql`),
-secrets read by other tools (`git diff`, `sort`, `source .env`, `curl -d @.env`) or through a
+secrets read by other tools (`git diff`, `source .env`, `curl -d @.env`) or through a
 glob or `$(…)` in the file name, a secret variable printed by name (`echo $API_KEY`), `set` and
 `declare -p`, guard files written by other tools (`curl -o`, `git apply`) or by moving their
 directory (`mv .claude …`), `$(…)` inside an unquoted heredoc, and it does not check the Read
@@ -318,7 +325,7 @@ session started with `--agent` is left alone too.
 | Rule | When | What happens |
 |---|---|---|
 | `loop` | the same call arrives for the `loop_repeats`-th time with nothing changed in between | denied: change the approach, or stop and report to the lead what blocks you |
-| `failure_streak` | `failure_streak` calls failed in a row | the next call is denied once: stop and report to the lead what fails and what you tried |
+| `failure_streak` | `failure_streak` calls failed in a row | the next call is denied once: if the failures were expected (no match, a test you expect to fail), go on; otherwise stop and report to the lead what fails and what you tried |
 | `long_run` | `warn_minutes` after the agent's first call | once, next to a tool result: if what is left will take more than about 10 more minutes, stop and report what is done, what is left, the expected time and the options |
 
 - The same call is the tool name and its whole input; for Bash the `description` is left out
@@ -332,16 +339,23 @@ session started with `--agent` is left alone too.
 - A failure is a failed call that was not interrupted; a successful call resets the streak. A
   call denied by a hook or a permission is neither. A call that reports or asks
   (SubagentHandback, SendMessage, AskUserQuestion) is never denied and resets the streak.
+- A Bash command that exits with a non-zero code is a failed call. Exit code 1 of `grep`,
+  `egrep`, `fgrep`, `rg`, `ag`, `diff`, `cmp`, `test`, `[`, `[[`, `git grep` or
+  `git diff --exit-code` (also `--quiet`, `--no-index`) means no match, a difference or false:
+  when that command is the whole call or its last pipeline stage, the exit neither counts nor
+  resets the streak. In a chain (`cd src && grep …`) or under `xargs` it counts.
 
 The settings are the `runaway` object in `~/.claude/agent-harness/guard.json` (under
 `$HARNESS_HOME` when set), then in the `guard` key of the project's
-`.claude/agent-harness.json`; a later value of a key wins. 0 turns a rule off.
+`.claude/agent-harness.json`; a later value of a key wins, except that `exclude_agents` lists
+add up. 0 turns a rule off.
 
 | Key | Default |
 |---|---|
 | `loop_repeats` | `3`; 0 or a whole number from 2 |
 | `failure_streak` | `5`; a whole number |
 | `warn_minutes` | `10`; minutes, fractions allowed |
+| `exclude_agents` | none; agent types the guard leaves alone, such as a watcher whose job is to wait for a pipeline, matched on the whole `agent_type` or the part after its last `:` (`ci-watcher` matches `agent-harness:ci-watcher`) |
 
 ```json
 { "guard": { "runaway": { "loop_repeats": 3, "failure_streak": 5, "warn_minutes": 10 } } }

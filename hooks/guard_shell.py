@@ -10,7 +10,8 @@ dirs in the project, `allowed_rm_dirs`), raw reads of secret files (also through
 of them, environment dumps, macOS keychain reads, connections to production database hosts,
 DROP/TRUNCATE in or piped into a database client command, and a `$(` never closed. Shell
 writes and Write/Edit/MultiEdit/NotebookEdit calls that change Claude Code settings, the
-guard's own settings, git hooks or installed plugins are denied too, as is `core.hooksPath`.
+guard's own settings, git hooks or installed plugins are denied too, as is `core.hooksPath`;
+the agent types in `tampering_allow_agents` may change the user's Claude Code settings.json.
 Each denial appends a line without the command to `$HARNESS_HOME/guard-events.jsonl`.
 Settings: built-in defaults, then `$HARNESS_HOME/guard.json` (default
 `~/.claude/agent-harness/guard.json`), then the `guard` key of the project's
@@ -58,6 +59,7 @@ DEFAULTS: dict[str, Any] = {
     "prod_db_hosts": [],
     "safe_filters": [],
     "extra_deny": [],
+    "tampering_allow_agents": ["statusline-setup"],
 }
 LIST_KEYS = {
     "secret_globs",
@@ -66,6 +68,7 @@ LIST_KEYS = {
     "prod_db_hosts",
     "safe_filters",
     "extra_deny",
+    "tampering_allow_agents",
 }
 REGEX_KEYS = {"prod_db_hosts", "safe_filters"}
 # Settings of other guard hooks that share this config; they validate their own.
@@ -106,6 +109,8 @@ SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 GREPS = {"grep", "egrep", "fgrep"}
 READERS = GREPS | {"cat", "head", "tail", "less", "more", "sed", "awk", "gawk", "strings"}
 READERS |= {"xxd", "base64", "rg", "bat", "nl", "tac", "jq", "od", "hexdump", "uuencode"}
+READERS |= {"cut", "sort", "uniq", "paste", "rev", "fold", "fmt", "pr", "comm", "join", "column"}
+READERS |= {"expand", "unexpand", "wc"}
 GREP_QUIET = {"-c", "-l", "-L", "-q", "--count", "--files-with-matches"}
 GREP_QUIET |= {"--files-without-match", "--quiet", "--silent"}
 GREP_LONG_VALUES = {"--regexp", "--file", "--max-count", "--after-context", "--before-context"}
@@ -145,11 +150,12 @@ SECRET_NAME = re.compile(
 KEYCHAIN_READS = {"find-generic-password", "find-internet-password", "dump-keychain"}
 FILE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path"}
 FILE_TOOLS["NotebookEdit"] = "notebook_path"
-CUT_OPTIONS = {"-d": "-d", "--delimiter": "-d", "-f": "-f", "--fields": "-f"}
+CUT_VALUES = {"--bytes", "--characters", "--delimiter", "--fields", "--output-delimiter"}
+CUT_NAMES_ONLY = {"-s", "--only-delimited", "-d", "--delimiter", "-f", "--fields"}
 REPO_GUARDS = ["*/.claude/settings.json", "*/.claude/settings.local.json"]
 REPO_GUARDS += ["*/.claude/agent-harness.json", "*/.git/hooks", "*/.git/hooks/*"]
 PRINT_PROCEED = (
-    "show key names or masked values instead (a pipe into `cut -d= -f1`, or a script that "
+    "show key names or masked values instead (a pipe into `cut -s -d= -f1`, or a script that "
     "parses the file and prints its keys), count or list matches with `grep -c`/`-l`/`-q`, "
     "or pipe the output through a filter listed in safe_filters."
 )
@@ -170,6 +176,7 @@ class Config:
     prod_db_hosts: list[re.Pattern[str]]
     safe_filters: list[re.Pattern[str]]
     extra_deny: list[tuple[re.Pattern[str], str]]
+    tampering_allow_agents: list[str]
     warnings: list[str]
 
 
@@ -313,6 +320,7 @@ def load_config(environ: Mapping[str, str], project: Path | None) -> Config:
         prod_db_hosts=[re.compile(p, re.I) for p in settings["prod_db_hosts"]],
         safe_filters=[re.compile(p) for p in settings["safe_filters"]],
         extra_deny=[(re.compile(i["pattern"]), i["reason"]) for i in settings["extra_deny"]],
+        tampering_allow_agents=settings["tampering_allow_agents"],
         warnings=warnings,
     )
 
@@ -606,9 +614,16 @@ def unwrap(words: list[str]) -> Call | None:
     return None
 
 
-def parse(args: list[str], short_values: str, long_values: set[str]) -> tuple[set[str], list[str]]:
+def parse(
+    args: list[str],
+    short_values: str,
+    long_values: set[str],
+    values: dict[str, list[str]] | None = None,
+) -> tuple[set[str], list[str]]:
+    """The flags and the operands; the option values go into `values` when it is given."""
     flags: set[str] = set()
     operands: list[str] = []
+    found: dict[str, list[str]] = {} if values is None else values
     i = 0
     while i < len(args):
         arg = args[i]
@@ -617,9 +632,12 @@ def parse(args: list[str], short_values: str, long_values: set[str]) -> tuple[se
             operands += args[i:]
             break
         if arg.startswith("--"):
-            name = arg.split("=", 1)[0]
+            name, equals, value = arg.partition("=")
             flags.add(name)
-            i += 1 if name in long_values and "=" not in arg else 0
+            if name in long_values and not equals:
+                value = args[i] if i < len(args) else ""
+                i += 1
+            found.setdefault(name, []).append(value)
             continue
         if not arg.startswith("-") or arg == "-":
             operands.append(arg)
@@ -627,6 +645,10 @@ def parse(args: list[str], short_values: str, long_values: set[str]) -> tuple[se
         for position, letter in enumerate(arg[1:], start=2):
             flags.add("-" + letter)
             if letter in short_values:
+                attached = arg[position:]
+                found.setdefault("-" + letter, []).append(
+                    attached or (args[i] if i < len(args) else "")
+                )
                 i += 1 if position == len(arg) else 0
                 break
     return flags, operands
@@ -664,7 +686,12 @@ def reader_files(program: str, args: list[str]) -> list[str] | None:
         return operands if flags & {"-e", "-f", "--regexp", "--file"} else operands[1:]
     if program == "jq":
         return jq_files(args)
-    return [arg for arg in args if not arg.startswith("-")]
+    if program == "wc":
+        return name_lists(args)
+    if program == "cut" and names_only(args):
+        return None
+    operands = [arg for arg in args if not arg.startswith("-")]
+    return operands + name_lists(args) if program == "sort" else operands
 
 
 def jq_files(args: list[str]) -> list[str]:
@@ -739,20 +766,29 @@ def bare_env(words: list[str]) -> bool:
 
 
 def names_only(args: list[str]) -> bool:
-    """Whether `cut` keeps only what comes before the first `=`: variable or key names."""
-    values: dict[str, str] = {}
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        i += 1
-        name, _, value = arg.partition("=") if arg.startswith("--") else (arg[:2], "", arg[2:])
-        key = CUT_OPTIONS.get(name)
-        if key is None:
-            continue
-        if not value and i < len(args):
-            value, i = args[i], i + 1
-        values[key] = value
-    return values.get("-d") == "=" and values.get("-f") == "1" and "--complement" not in args
+    """Whether `cut` prints only what comes before the first `=`, and only of lines with one."""
+    values: dict[str, list[str]] = {}
+    flags, _ = parse(args, "bcdf", CUT_VALUES, values)
+    delimiters = values.get("-d", []) + values.get("--delimiter", [])
+    fields = values.get("-f", []) + values.get("--fields", [])
+    delimited = bool(flags & {"-s", "--only-delimited"}) and flags <= CUT_NAMES_ONLY
+    return delimited and set(delimiters) == {"="} and set(fields) == {"1"}
+
+
+def reads_names(arg: str) -> bool:
+    """Whether an argument is `--files0-from`, which GNU accepts abbreviated."""
+    name = arg.split("=", 1)[0]
+    return len(name) > 2 and "--files0-from".startswith(name)
+
+
+def name_lists(args: list[str]) -> list[str]:
+    """The files `--files0-from` reads file names from; an error prints each name it reads."""
+    files = []
+    for i, arg in enumerate(args):
+        _, equals, value = arg.partition("=")
+        if reads_names(arg):
+            files.append(value if equals else "".join(args[i + 1 : i + 2]))
+    return files
 
 
 def copy_paths(program: str, args: list[str]) -> tuple[list[str], list[str]]:
@@ -761,11 +797,12 @@ def copy_paths(program: str, args: list[str]) -> tuple[list[str], list[str]]:
         sources = [arg[3:] for arg in args if arg.startswith("if=")]
         return sources, [arg[3:] for arg in args if arg.startswith("of=")]
     short_values, long_values = COPIERS[program]
-    flags, operands = parse(args, short_values, long_values)
-    if "t" not in short_values or not flags & {"-t", "--target-directory"}:
+    values: dict[str, list[str]] = {}
+    _, operands = parse(args, short_values, long_values, values)
+    targets = values.get("-t", []) + values.get("--target-directory", [])
+    if "t" not in short_values or not targets:
         return operands[:-1], operands[-1:]
-    named = [arg.partition("=")[2] for arg in args if arg.startswith("--target-directory=")]
-    return operands, named + [arg for arg in args if not arg.startswith("-")]
+    return operands, targets
 
 
 def changed_paths(call: Call) -> list[str]:
@@ -799,14 +836,31 @@ def sets_hooks_path(args: list[str]) -> bool:
     return value or bool(CONFIG_CHANGES & set(args))
 
 
-def live_guards(environ: Mapping[str, str]) -> list[str]:
-    """Globs of guard files that are live wherever they are: user and harness settings, plugins."""
+def claude_config_dir(environ: Mapping[str, str]) -> str:
     home = environ.get("HOME") or str(Path.home())
     config = expand(environ.get("CLAUDE_CONFIG_DIR", "").strip(), environ)
-    config = config or str(PurePath(home, ".claude"))
+    return config or str(PurePath(home, ".claude"))
+
+
+def live_guards(environ: Mapping[str, str]) -> list[str]:
+    """Globs of guard files that are live wherever they are: user and harness settings, plugins."""
+    config = claude_config_dir(environ)
     files = [(str(harness_home(environ)), name) for name in ("guard.json", "memory.json")]
     files += [(config, name) for name in ("settings.json", "plugins", "plugins/*")]
     return [str(PurePath(glob.escape(os.path.realpath(d)), name)).lower() for d, name in files]
+
+
+def user_settings(environ: Mapping[str, str]) -> list[str]:
+    """Globs of the user's Claude Code settings.json: as named, in the resolved dir, resolved."""
+    path = os.path.normpath(PurePath(claude_config_dir(environ), "settings.json"))
+    forms = [path, resolved_dir(path), os.path.realpath(path)]
+    return [glob.escape(form).lower() for form in dict.fromkeys(forms)]
+
+
+def resolved_dir(path: str) -> str:
+    """The path with its directory resolved and its last part kept, a link or not."""
+    pure = PurePath(path)
+    return str(PurePath(os.path.realpath(pure.parent), pure.name))
 
 
 def db_hosts(call: Call) -> list[str]:
@@ -854,6 +908,7 @@ class Checker:
         cwd: str | None,
         subagent: bool,
         project: str | None = None,
+        may_change_user_settings: bool = False,
     ) -> None:
         self.config = config
         self.environ = environ
@@ -864,6 +919,7 @@ class Checker:
         self.subagent = subagent
         self.project = os.path.realpath(project) if project else None
         self.live = live_guards(environ)
+        self.own_settings = user_settings(environ) if may_change_user_settings else []
 
     def script(self, text: str, depth: int = 0) -> Denial | None:
         if depth > MAX_DEPTH:
@@ -981,14 +1037,19 @@ class Checker:
     def guarded(self, target: str) -> bool:
         resolved = [self.path(target, cwd) for cwd in self.cwds]
         known = [path for path in resolved if path is not None]
-        candidates = [path.lower() for path in known]
+        lexical = [p for p in (self.path(target, cwd, resolve=False) for cwd in self.cwds) if p]
+        candidates = [path.lower() for path in known + lexical]
         if len(known) < len(resolved):
             candidates.append(expand(target, self.environ).lower())
+        own = self.own_settings
+        candidates = [c for c in candidates if not any(fnmatchcase(c, p) for p in own)]
         if any(fnmatchcase(c, pattern) for c in candidates for pattern in self.live):
             return True
         if not any(fnmatchcase("/" + c, pattern) for c in candidates for pattern in REPO_GUARDS):
             return False
-        return len(known) < len(resolved) or not all(self.disposable(path) for path in known)
+        # A link is live where it lies, not where it points; its dir may be a link (/tmp on macOS).
+        links = [resolved_dir(path) for path in lexical]
+        return len(known) < len(resolved) or not all(self.disposable(p) for p in known + links)
 
     def disposable(self, path: str) -> bool:
         """Inside the temp dir or scratchpad, and not the session's project."""
@@ -996,7 +1057,7 @@ class Checker:
         temp = any(fnmatchcase(p, pattern) for p in parents for pattern in self.config.rm_dirs)
         return temp and not (self.project and PurePath(path).is_relative_to(self.project))
 
-    def path(self, text: str, cwd: str | None) -> str | None:
+    def path(self, text: str, cwd: str | None, resolve: bool = True) -> str | None:
         text = expand(text, self.environ)
         if not text or "$" in text or "`" in text or text.startswith("~"):
             return None
@@ -1005,7 +1066,7 @@ class Checker:
             return None
         if not candidate.is_absolute():
             candidate = PurePath(cwd or "") / candidate
-        return os.path.realpath(candidate)
+        return os.path.realpath(candidate) if resolve else os.path.normpath(candidate)
 
     def inside(self, path: str | None) -> bool:
         if path is None:
@@ -1267,7 +1328,7 @@ class Checker:
             "env-dump",
             f"`{text}` prints environment variables with their values, which hold tokens "
             "and passwords",
-            "list the names with `env | cut -d= -f1`, or check that a variable is set without "
+            "list the names with `env | cut -s -d= -f1`, or check that a variable is set without "
             'printing it (`test -n "$NAME"`, `printenv NAME | wc -c`).',
         )
 
@@ -1310,13 +1371,15 @@ class Checker:
         return isinstance(following, Command) and self.safe_filter(following)
 
     def safe_redirect(self, call: Call | None, command: Command) -> bool:
-        # Under xargs, xargs reads the file and turns its content into arguments.
-        return call is not None and not call.via_xargs and self.safe_filter(command)
+        return call is not None and self.safe_filter(command)
 
     def safe_filter(self, command: Command) -> bool:
         call = unwrap(command.words)
+        # Under xargs or `wc --files0-from` the input becomes file names, which errors print.
+        if call and call.via_xargs:
+            return False
         if call and call.program == "wc":
-            return True
+            return not any(reads_names(arg) for arg in call.args)
         if call and call.program == "cut" and names_only(call.args):
             return True
         if call and call.program in GREPS and reader_files(call.program, call.args) is None:
@@ -1373,10 +1436,12 @@ def check(event: dict[str, Any], environ: Mapping[str, str]) -> tuple[Denial | N
     cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
     project_dir = environ.get("CLAUDE_PROJECT_DIR") or cwd
     config = load_config(environ, Path(project_dir) if project_dir else None)
-    subagent = bool(event.get("agent_type"))
+    agent = event.get("agent_type")
+    subagent = bool(agent)
     if config.scope != "all" and not subagent:
         return None, config.warnings
-    checker = Checker(config, environ, cwd or project_dir, subagent, project_dir)
+    exempt = isinstance(agent, str) and agent in config.tampering_allow_agents
+    checker = Checker(config, environ, cwd or project_dir, subagent, project_dir, exempt)
     if tool != "Bash":
         return checker.tamper_denial(f"`{tool}`", [command]), config.warnings
     denial = checker.script(command)

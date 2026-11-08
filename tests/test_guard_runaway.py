@@ -24,6 +24,8 @@ def load_hook() -> Any:
     sys.path.insert(0, str(HOOKS))
     try:
         spec.loader.exec_module(module)
+        for sibling in ("guard_shell", "save_artifacts"):
+            importlib.import_module(sibling)
     finally:
         sys.path.remove(str(HOOKS))
     return module
@@ -97,8 +99,10 @@ class Run:
     def post(self, call: Call = EDIT) -> str | None:
         return self.context("PostToolUse", call)
 
-    def fail(self, call: Call = TEST, interrupt: bool | None = False) -> str | None:
-        fields: dict[str, Any] = {"error": "Exit code 1\nFAILED", "duration_ms": 1200}
+    def fail(
+        self, call: Call = TEST, interrupt: bool | None = False, error: str = "Exit code 1\nFAILED"
+    ) -> str | None:
+        fields: dict[str, Any] = {"error": error, "duration_ms": 1200}
         if interrupt is not None:
             fields["is_interrupt"] = interrupt
         return self.context("PostToolUseFailure", call, **fields)
@@ -262,8 +266,80 @@ def test_failure_streak_reason_and_count(tmp_path):
         run.fail(("Bash", {"command": f"step {i}"}))
     assert run.pre(EDIT) == (
         "agent-harness runaway guard, rule failure_streak: 7 calls failed in a row. "
-        "To proceed: stop and report to the lead what fails and what you tried."
+        "To proceed: if the failures were expected (no match, a test you expect to fail), go "
+        "on; otherwise stop and report to the lead what fails and what you tried."
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -rn checkout src",
+        "egrep -r 'cart|order' src",
+        "fgrep -r checkout src",
+        "rg checkout",
+        "ag checkout",
+        "diff old.txt new.txt",
+        "cmp old.bin new.bin",
+        "test -f build/out.txt",
+        "[ -f build/out.txt ]",
+        "[[ -f build/out.txt ]]",
+        "git diff --exit-code",
+        "git diff --quiet HEAD -- src",
+        "git -C /work/shop grep checkout",
+        "cat app.log | grep ERROR",
+        "timeout 5 grep -rn checkout src",
+        "grep -rn checkout src 2>/dev/null;",
+        "! grep -q TODO src/cart.py",
+    ],
+)
+def test_a_no_match_or_false_exit_is_not_a_failure(tmp_path, command):
+    run = Run(tmp_path)
+    for _ in range(6):
+        assert run.fail(("Bash", {"command": command})) is None
+    assert run.pre(EDIT) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "error"),
+    [
+        ("grep -rn checkout src", "Exit code 2\ngrep: src: No such file or directory"),
+        ("grep -rn checkout src", "Command timed out"),
+        ("grep -rn checkout src", "Error\nExit code 1"),
+        ("cd src && grep -rn checkout .", "Exit code 1"),
+        ("grep -rn checkout src || npm test", "Exit code 1"),
+        ("grep -rn checkout src; npm test", "Exit code 1"),
+        ("grep -rn checkout src | sort", "Exit code 1"),
+        ("(grep -rn checkout src)", "Exit code 1"),
+        ("find src -name '*.py' | xargs grep checkout", "Exit code 1"),
+        ("npm test", "Exit code 1"),
+        ("git diff", "Exit code 1"),
+        ("git log --grep checkout", "Exit code 1"),
+        ("echo $(grep x", "Exit code 1"),
+    ],
+)
+def test_other_failures_still_count(tmp_path, command, error):
+    run = Run(tmp_path)
+    for _ in range(5):
+        run.fail(("Bash", {"command": command}), error=error)
+    reason = run.pre(EDIT)
+    assert reason
+    assert "rule failure_streak" in reason
+
+
+def test_a_failed_search_tool_still_counts_and_a_no_match_does_not_reset(tmp_path):
+    grep_tool: Call = ("Grep", {"pattern": "checkout", "path": "/work/shop/src"})
+    run = Run(tmp_path)
+    for _ in range(5):
+        run.fail(grep_tool)
+    assert run.pre(EDIT)
+    for _ in range(4):
+        run.fail()
+    run.fail(("Bash", {"command": "grep -rn checkout src"}))
+    run.fail()
+    reason = run.pre(EDIT)
+    assert reason
+    assert "5 calls failed in a row" in reason
 
 
 def test_failure_streak_wins_over_a_loop(tmp_path):
@@ -408,6 +484,51 @@ def test_loop_repeats_zero_turns_off_only_the_loop(tmp_path):
     assert streak_denials(run, "fffffp") == [5]
 
 
+@pytest.mark.parametrize(
+    ("excluded", "agent_type", "off"),
+    [
+        (["ci-watcher"], "agent-harness:ci-watcher", True),
+        (["ci-watcher"], "ci-watcher", True),
+        (["agent-harness:ci-watcher"], "agent-harness:ci-watcher", True),
+        (["agent-harness:ci-watcher"], "other:ci-watcher", False),
+        (["ci-watcher"], "agent-harness:implementer", False),
+        (["ci-watcher"], "ci-watcher-2", False),
+        ([], "ci-watcher", False),
+    ],
+)
+def test_excluded_agents_are_never_touched(tmp_path, excluded, agent_type, off):
+    write_json(tmp_path / "guard.json", {"runaway": {"exclude_agents": excluded}})
+    run = Run(tmp_path, {"agent_id": "agent-1", "agent_type": agent_type})
+    loops = denied(run, [TEST] * 3)
+    for i in range(5):
+        run.fail(("Bash", {"command": f"step {i}"}))
+    streak = run.pre(EDIT)
+    run.clock += DAY
+    note = run.post()
+    if off:
+        assert (loops, streak, note) == ([], None, None)
+        assert not (tmp_path / "runaway").exists()
+        assert guard_events(tmp_path) == []
+        return
+    assert loops == [2]
+    assert streak
+    assert note
+
+
+def test_excluded_agents_add_up_across_the_config_files(tmp_path):
+    write_json(tmp_path / "guard.json", {"runaway": {"exclude_agents": ["ci-watcher"]}})
+    project = tmp_path / "shop"
+    write_json(
+        project / ".claude" / "agent-harness.json",
+        {"guard": {"runaway": {"exclude_agents": ["deploy-watcher"]}}},
+    )
+    for agent in ("ci-watcher", "deploy-watcher"):
+        run = Run(tmp_path, {"agent_id": agent, "agent_type": agent}, cwd=str(project))
+        assert denied(run, [TEST] * 3) == []
+    run = Run(tmp_path, {"agent_id": "a-3", "agent_type": "implementer"}, cwd=str(project))
+    assert denied(run, [TEST] * 3) == [2]
+
+
 def test_all_rules_off_writes_no_state(tmp_path):
     off = {"loop_repeats": 0, "failure_streak": 0, "warn_minutes": 0}
     write_json(tmp_path / "guard.json", {"runaway": off})
@@ -434,6 +555,8 @@ def test_all_rules_off_writes_no_state(tmp_path):
         ('{"warn_minutes": "10"}', "runaway.warn_minutes must be a number, 0 or more"),
         ('{"warn_minutes": false}', "runaway.warn_minutes must be a number, 0 or more"),
         ('{"loops": 2}', "unknown key runaway.loops"),
+        ('{"exclude_agents": "ci-watcher"}', "runaway.exclude_agents must be a list of strings"),
+        ('{"exclude_agents": [1]}', "runaway.exclude_agents must be a list of strings"),
         ("[3]", "runaway is not a JSON object, so it is ignored"),
     ],
 )
@@ -589,6 +712,29 @@ def test_the_script_imports_its_siblings_and_denies_the_third_repeat(tmp_path):
     output = json.loads(results[2].stdout)["hookSpecificOutput"]
     assert output["permissionDecision"] == "deny"
     assert "rule loop" in output["permissionDecisionReason"]
+
+
+SUBAGENT_ONLY = {"guard_shell", "save_artifacts", "hashlib", "shutil", "tempfile", "datetime"}
+SUBAGENT_ONLY |= {"pathlib"}
+
+
+def test_a_main_session_call_imports_only_what_it_needs(tmp_path):
+    event: dict[str, Any] = {"session_id": "s", "hook_event_name": "PreToolUse"}
+    event |= {"tool_name": "Bash", "tool_input": {"command": "npm test"}, "cwd": str(tmp_path)}
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "HARNESS_HOME": str(tmp_path)}
+    imported = []
+    for identity in ({}, SUBAGENT):
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-X", "importtime", str(SCRIPT)],
+            input=json.dumps(event | identity),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        names = {line.rsplit("|", 1)[-1].strip() for line in result.stderr.splitlines()}
+        imported.append(names & SUBAGENT_ONLY)
+    assert imported == [set(), SUBAGENT_ONLY]
 
 
 def test_hooks_json_runs_the_guard_on_every_tool_call():
