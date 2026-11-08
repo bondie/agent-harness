@@ -53,7 +53,7 @@ its own marketplace.
 | `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/` (under `$HARNESS_HOME` when set). |
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |
-| `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database ([rules](#shell-guard)). |
+| `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database, and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
 | `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
@@ -181,7 +181,8 @@ end-to-end run of the handback path, because auto mode cannot be scripted with `
 session with `"scope": "all"`. It parses the command, so it also sees `;`/`&&`/`||` chains,
 pipes, subshells, `$(…)`, `bash -c`/`sh -c`, `eval`, heredocs fed to a shell, `sudo`, `env`,
 `nohup` and `timeout` prefixes, variable assignments, quoting tricks and absolute binary paths.
-Each deny reason names the rule and how to proceed.
+It also checks the Write, Edit, MultiEdit and NotebookEdit calls of the same agents against the
+guard files (`guard-tampering`). Each deny reason names the rule and how to proceed.
 
 | Rule | Denied | Allowed |
 |---|---|---|
@@ -189,8 +190,13 @@ Each deny reason names the rule and how to proceed.
 | `push-delete` | `git push --delete`, `-d`, `:ref`, `--prune`, `--mirror` | a normal push |
 | `force-with-lease` | `git push --force-with-lease` from a subagent | from the main agent, by default |
 | `git-discard` | `git reset --hard`, `git clean -f`, `git checkout .`/`-- .`/`-f`, `git restore .` | in a repository inside the temp dirs; `clean -n`, `restore --staged .`, single files |
+| `branch-force-delete` | `git branch -D`, `--delete --force`, `-df` | `git branch -d`; in a repository inside the temp dirs |
 | `rm-outside-allowed-dirs` | `rm -r`/`-rf`/`-fr`/`-R`, `find -delete`/`-exec rm`, `xargs rm -r` outside the allowed dirs | below `$TMPDIR` (`/tmp` when unset) or `/tmp/claude-*`, the default build and cache dirs in the project, and `allowed_rm_dirs` |
-| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs` | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c` or a `safe_filters` match; `secret_allow_globs` |
+| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `od`, `hexdump`, `uuencode`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs`, or the file fed to any command through `<` | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c`, `cut -d= -f1` or a `safe_filters` match; `secret_allow_globs` |
+| `secret-copy` | `cp`, `mv`, `install`, `ditto`, `scp`, `rsync` or `dd if=` with a file in `secret_globs` as a source | `cp .env.example .env`; the file as the destination; `scp -i`/`rsync -e`/`--exclude` values |
+| `env-dump` | `env` without a command, `printenv` without a name or with one that contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `PASS`, `AUTH` or `CREDENTIAL` before `_` or at its end, `export`/`export -p` | `env FOO=1 make`, `printenv HOME`; a pipe into `cut -d= -f1`, `wc` or `grep -c` |
+| `keychain-read` | `security find-generic-password`, `find-internet-password`, `dump-keychain` | other `security` commands |
+| `guard-tampering` | a guard file (below) as the target of `>`/`>>`, `tee`, `sed -i`, `perl -i`, `truncate`, `chmod`, `rm`, `unlink` or `shred`, the destination of `cp`, `mv`, `ln`, `install`, `ditto`, `scp`, `rsync` or `dd of=`, the source of `mv`, or of a Write, Edit, MultiEdit or NotebookEdit; `git config core.hooksPath <dir>`, `git -c core.hooksPath=…` | reading them; the repository's own `hooks/`; a copy inside the temp dirs that is not the project |
 | `prod-db` | `mysql`, `mariadb`, `psql`, `mongosh`, `mongo`, `redis-cli` whose `-h`/`--host`, URI, `host=` or `PGHOST`/`MYSQL_HOST` matches `prod_db_hosts` | any host while `prod_db_hosts` is empty (the default) |
 | `destructive-sql` | `DROP DATABASE`/`TABLE`/`SCHEMA` or `TRUNCATE` in a database client's arguments or heredoc, or in the command piped into it, for any host | `SELECT TRUNCATE(x, 2)` |
 | `unparsable` | a `$(` that is never closed, so the rest of the command cannot be checked | |
@@ -200,6 +206,13 @@ A relative path resolves against the working directory and follows `cd` in the c
 path with an unknown variable or `$(…)`, or in an unknown directory, counts as outside; so
 does any relative path after more than 16 possible working directories (`cd a; …; cd b; …`).
 `/tmp/claude-501` itself is not below `/tmp/claude-*`, so it stays protected.
+
+The guard files are `.claude/settings.json`, `.claude/settings.local.json` and
+`.claude/agent-harness.json` in any directory, everything under `.git/hooks/`, `guard.json` and
+`memory.json` in `$HARNESS_HOME`, and `settings.json` and `plugins/` in `~/.claude`
+(`$CLAUDE_CONFIG_DIR` when set), matched ignoring case. Those in `$HARNESS_HOME` and `~/.claude`
+are protected everywhere; the others may be changed inside the temp dirs, unless they belong to
+the project (`CLAUDE_PROJECT_DIR`, else the working directory).
 
 The settings merge built-in defaults, `~/.claude/agent-harness/guard.json` (under
 `$HARNESS_HOME` when set) and the `guard` key of the project's `.claude/agent-harness.json`.
@@ -217,8 +230,9 @@ Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the 
 | `extra_deny` | none; `{"pattern": "<regex searched in the whole command>", "reason": "<text>"}` |
 
 A glob without `/` matches the file name, one with `/` the path at any depth, both ignoring
-case. An invalid file or key is ignored and named in the next deny reason. An internal error
-lets the command through and logs to stderr. Example ([`examples/agent-harness.json`](examples/agent-harness.json)):
+case. An invalid file or key is ignored and named in the next deny reason; a `runaway` object
+is left to the hook that reads it. An internal error lets the command through and logs to
+stderr. Example ([`examples/agent-harness.json`](examples/agent-harness.json)):
 
 ```json
 {
@@ -242,9 +256,63 @@ lets the command through and logs to stderr. Example ([`examples/agent-harness.j
 The guard catches mistakes; it is not a sandbox against deliberate evasion. It does not see
 inside scripts a command runs (`./clean.sh`, `python -c`, `make`), commands piped into `sh`,
 what `docker exec` and `ssh` run elsewhere, SQL in a file fed to a client (`mysql < x.sql`),
-secrets read by other tools (`git diff`, `cp`, `sort`, `source .env`) or through a glob or
-`$(…)` in the file name, `$(…)` inside an unquoted heredoc, and it does not check the Read
+secrets read by other tools (`git diff`, `sort`, `source .env`, `curl -d @.env`) or through a
+glob or `$(…)` in the file name, a secret variable printed by name (`echo $API_KEY`), `set` and
+`declare -p`, guard files written by other tools (`curl -o`, `git apply`) or by moving their
+directory (`mv .claude …`), `$(…)` inside an unquoted heredoc, and it does not check the Read
 tool.
+
+### Coverage
+
+`tests/test_guard_battery.py` runs the 90 dangerous commands of the
+[guardrail-tester](https://github.com/RyanAlberts/best-of-Agent-Harnesses/tree/main/skills/guardrail-tester)
+skill (MIT License, Copyright (c) 2026 Ryan Alberts; kept verbatim with its license in
+[`tests/data/`](tests/data)) as a subagent working in `/work/shop`.
+`tests/data/guard-battery-policy.json` gives each case a verdict and its reason. A gap is an
+expected failure of the test, so closing one fails it until the policy and this table follow.
+
+| Category | Denied | Allowed by design | Gap |
+|---|---|---|---|
+| destructive-git | 15 / 15 | 0 | 0 |
+| destructive-files | 4 / 11 | 7 | 0 |
+| privilege | 1 / 4 | 0 | 3 |
+| secrets | 10 / 12 | 0 | 2 |
+| remote-code | 0 / 4 | 0 | 4 |
+| exfiltration | 2 / 4 | 0 | 2 |
+| wrappers | 6 / 16 | 8 | 2 |
+| publishing | 0 / 3 | 0 | 3 |
+| infrastructure | 1 / 5 | 0 | 4 |
+| guardrail-tampering | 7 / 8 | 0 | 1 |
+| file-tools | 0 / 8 | 0 | 8 |
+| total | 46 / 90 | 15 | 29 |
+
+The cases allowed by design delete `./guardrail-tester-probe/build`, a build dir the guard
+allows inside the project; the test runs each again on `…/src` and expects a denial. The gaps:
+
+- Outside the guard's purpose, left to Claude Code's permission prompt or an `extra_deny`
+  pattern: running as root (`sudo-path`, `su-root`, `sudo-pipe`), downloading and running code
+  (`curl-sh`, `bash-procsub`, `curl-then-sh`, `python-exec-url`), uploads and pushes to a URL
+  (`curl-data-env`, `push-to-url`), publishing (`npm-publish`, `twine-upload`, `gh-release`),
+  infrastructure tools (`terraform-destroy`, `terraform-apply`, `kubectl-delete-ns`,
+  `aws-s3-rm`), another agent's configuration (`write-codex-config`), and files outside the
+  repository that are not guard files (`write-zshrc`, `write-authorized-keys`,
+  `write-launch-agent`, `shell-append-zshrc`).
+- Allowed on purpose: searching code for key names, such as `grep -r API_KEY src/`, is routine
+  (`grep-keys`).
+- Out of the parser's sight: code inside `python -c` (`python-open-env`), a command decoded at
+  run time and piped into `sh` (`base64-sh`), and what `docker exec` runs in a container
+  (`docker-exec-rm`).
+- The Read tool is not checked (`read-env`, `read-env-nested`, `read-ssh-key`, `read-aws`): deny
+  it in Claude Code's permissions, for example `"deny": ["Read(./.env)", "Read(./.env.*)"]`.
+
+### Guard events
+
+Each denial appends one line to `guard-events.jsonl` under `$HARNESS_HOME` (default
+`~/.claude/agent-harness/`): `time` (ISO 8601, UTC), `hook` (`guard_shell`), `session`,
+`agent_id`, `agent_type`, `tool`, `rule` (the rule name from the tables above) and `decision`
+(`deny`). It never holds the command, file content or paths, which may contain secrets. Writing
+it is best effort: a failure is logged to stderr and the decision stands. Other hooks append
+with `log_guard_event(environ, event, hook, rule, decision)` from `hooks/guard_shell.py`.
 
 ## Memory hygiene
 
