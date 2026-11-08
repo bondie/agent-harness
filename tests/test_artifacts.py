@@ -321,12 +321,26 @@ def test_an_unwritable_home_never_fails(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "prompt", ["Retro for SHOP-412. Do not write yet.", "  retro FOR SHOP-412"]
+    "prompt",
+    [
+        "Retro for SHOP-412. Do not write yet.",
+        "  retro FOR SHOP-412",
+        "SHOP-412: Retro for SHOP-412. Do not write yet.",
+        "SHOP-412 : retro for SHOP-412",
+    ],
 )
 def test_a_retro_run_saves_nothing(tmp_path, prompt):
     report = f"Lessons.\n\n{fenced('review', REVIEW)}"
     tickets = save(tmp_path, stop(tmp_path, report, prompt=prompt))
     assert not tickets.exists()
+
+
+@pytest.mark.parametrize(
+    "prompt", ["SHOP-412: Review the retro for SHOP-411", "Explain the Retro format", "SHOP-412:"]
+)
+def test_a_task_that_only_mentions_a_retro_is_saved(tmp_path, prompt):
+    tickets = save(tmp_path, stop(tmp_path, "Done.", prompt=prompt))
+    assert tickets.exists()
 
 
 @pytest.mark.parametrize(

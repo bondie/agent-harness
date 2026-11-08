@@ -34,7 +34,8 @@ from typing import Any, TextIO
 
 AGENT = "estimator"
 HANDBACK = "SubagentHandback"
-RETRO = "retro for"
+# "Retro for <KEY>", optionally after the "<KEY>: " every ticket task starts with.
+RETRO = re.compile(r"\s*(?:[A-Za-z][A-Za-z0-9]+-\d+\s*:\s*)?retro for\b", re.IGNORECASE)
 MAX_BLOCKS = 2
 MODES = ("bottom-up", "reference")
 KINDS = ("implementation", "verification", "release")
@@ -261,7 +262,7 @@ def is_retro(event: Mapping[str, Any]) -> bool:
         message = entry.get("message")
         task = _text(message.get("content") if isinstance(message, dict) else None)
         if task.strip():
-            return task.lstrip().lower().startswith(RETRO)
+            return RETRO.match(task) is not None
     return False
 
 

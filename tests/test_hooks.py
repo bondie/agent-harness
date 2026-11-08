@@ -928,12 +928,13 @@ def test_the_estimator_is_sent_back_at_most_twice(tmp_path):
     assert resumed["decision"] == "block"
 
 
-def test_a_retro_run_of_the_estimator_is_not_checked(tmp_path):
+@pytest.mark.parametrize("task", ["Retro for SHOP-412.", "SHOP-412: Retro for SHOP-412."])
+def test_a_retro_run_of_the_estimator_is_not_checked(tmp_path, task):
     path = tmp_path / "subagents" / "agent-a1.jsonl"
     path.parent.mkdir()
     entries = [
         {"type": "user", "isMeta": True, "message": {"content": "Estimate SHOP-1"}},
-        {"type": "user", "message": {"content": [{"type": "text", "text": "Retro for SHOP-412."}]}},
+        {"type": "user", "message": {"content": [{"type": "text", "text": task}]}},
     ]
     path.write_text("\n".join(map(json.dumps, entries)) + "\n")
     invalid = estimate_report(total=3)

@@ -604,23 +604,78 @@ def test_an_untrusted_repository_alone_runs_nothing(tmp_path):
     touch(other, "lib/b.py")
     report = fenced("implementation", {"files": [str(other / "lib/b.py")]})
 
-    assert gate(tmp_path, finished(tmp_path, other, report), project=repo) is None
+    answer = gate(tmp_path, finished(tmp_path, other, report), project=repo)
+
     assert not marker.exists()
-    assert not (tmp_path / "home").exists()
+    assert answer is not None
+    assert answer["systemMessage"].startswith(f"The quality gate did not check lib/b.py in {other}")
+    result = gates(tmp_path)
+    assert (result["passed"], result["commands"]) == (True, [])
+    assert result["skipped"] == [{"repo": str(other), "files": ["lib/b.py"]}]
+    assert result["notes"] == [answer["systemMessage"]]
 
 
-def retro(tmp_path: Path, event: dict[str, Any]) -> dict[str, Any]:
-    path = transcript(tmp_path, user("retro for SHOP-412. Do not write yet."), name="agent-i1")
+def test_a_repository_under_a_session_folder_outside_git_is_trusted(tmp_path, check):
+    folder = tmp_path / "work"
+    repo = git_repository(folder / "shop")
+    configure(repo, [{"cmd": check("shop", 1), "match": r"\.py$"}])
+    touch(repo, "src/a.py")
+
+    answer = gate(tmp_path, finished(tmp_path, repo), project=folder)
+
+    assert answer is not None
+    assert answer["decision"] == "block"
+    assert f'shop {repo} ["src/a.py"]' in answer["reason"]
+
+
+def test_a_worktree_of_the_session_repository_is_trusted(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    touch(repo, "src/a.py")
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "-A"], check=True)  # noqa: S603
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)  # noqa: S603
+    worktree = tmp_path / "elsewhere" / "w1"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "w1", str(worktree)], check=True)  # noqa: S603
+    worktree = worktree.resolve()
+    configure(worktree, [{"cmd": check("wt", 1), "match": r"\.py$"}])
+    touch(worktree, "src/b.py")
+
+    answer = gate(tmp_path, finished(tmp_path, worktree), project=repo)
+
+    assert answer is not None
+    assert answer["decision"] == "block"
+    assert f'wt {worktree} ["src/b.py"]' in answer["reason"]
+
+
+def test_an_unusable_repositories_entry_is_skipped_with_a_note(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    commands = [{"cmd": check("shop")}]
+    configure(repo, {"commands": commands, "repositories": ["~nosuchuser-ah/x", "../ok"]})
+    touch(repo, "src/a.py")
+    report = fenced("implementation", {"files": ["src/a.py", "~nosuchuser-ah/y.py"]})
+
+    answer = gate(tmp_path, finished(tmp_path, repo, report))
+
+    assert answer is not None
+    assert "ignored the gate.repositories entry ~nosuchuser-ah/x" in answer["systemMessage"]
+    assert gates(tmp_path)["commands"][0]["output_tail"] == f'shop {repo} ["src/a.py"]'
+
+
+def retro(tmp_path: Path, event: dict[str, Any], task: str) -> dict[str, Any]:
+    path = transcript(tmp_path, user(task), name="agent-i1")
     return {**event, "agent_transcript_path": str(path)}
 
 
-def test_a_retro_run_is_not_gated(tmp_path, check):
+@pytest.mark.parametrize(
+    "task", ["retro for SHOP-412. Do not write yet.", "SHOP-412: Retro for SHOP-412."]
+)
+def test_a_retro_run_is_not_gated(tmp_path, check, task):
     repo = git_repository(tmp_path / "shop")
     configure(repo, [{"cmd": check("lint", 1)}])
     touch(repo, "src/shop.py")
 
-    assert gate(tmp_path, retro(tmp_path, finished(tmp_path, repo))) is None
-    assert gate(tmp_path, retro(tmp_path, handing_back(tmp_path, repo))) is None
+    assert gate(tmp_path, retro(tmp_path, finished(tmp_path, repo), task)) is None
+    assert gate(tmp_path, retro(tmp_path, handing_back(tmp_path, repo), task)) is None
     assert not (tmp_path / "home").exists()
 
 

@@ -55,7 +55,8 @@ NOT_TICKET_PREFIXES = (
     "UTC",
     "GMT",
 )
-RETRO = "retro for"
+# "Retro for <KEY>", optionally after the "<KEY>: " every ticket task starts with.
+RETRO = re.compile(r"\s*(?:[A-Za-z][A-Za-z0-9]+-\d+\s*:\s*)?retro for\b", re.IGNORECASE)
 
 
 class Block(NamedTuple):
@@ -116,7 +117,7 @@ def task_prompt(entries: list[dict[str, Any]]) -> str:
 
 
 def is_retro(entries: list[dict[str, Any]]) -> bool:
-    return task_prompt(entries).lstrip().lower().startswith(RETRO)
+    return RETRO.match(task_prompt(entries)) is not None
 
 
 def is_ticket(text: str) -> bool:

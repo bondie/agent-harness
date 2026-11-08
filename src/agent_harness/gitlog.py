@@ -159,26 +159,55 @@ class Attribution:
 
 
 def ticket_of(repo: Path, commit: str) -> Attribution | None:
-    """The ticket keys of a commit: from its message, else from the first merge that brought
-    its branch in (a merge request's merge commit carries the branch name and the title).
+    """The ticket keys of a commit: from its message, else from the merge that brought it into
+    a branch (a merge request's merge commit carries the branch name and the title).
 
-    A merge brought the commit in only when the commit is on its second parent's side and
-    not on its first: a commit made on the target branch belongs to no later merge.
+    Only branches that no other branch contains count, so a merged feature branch does not,
+    and on each only its first-parent chain. The oldest commit there that contains the commit
+    is the commit itself when it was made on that branch (a hotfix: no ticket), else the merge
+    that brought it in. A merge that brought in a branch which already held another such merge
+    (the target branch synced into a feature branch) does not count.
     """
     commit = resolve(repo, commit)
     keys = ticket_keys(git(repo, "log", "-1", "--format=%B", commit))
     if keys:
         return Attribution(tuple(keys), "the commit message")
-    path = ["log", "--all", f"^{commit}", "--ancestry-path"]
-    descendants = {commit, *git(repo, *path, "--format=%H").split()}
-    merges = git(
-        repo, *path, "--merges", "--topo-order", "--reverse", f"--format={RECORD}%P%x00%B"
-    ).split(RECORD)[1:]
-    for merge in merges:
-        parents, message = merge.split("\x00", 1)
-        first, second = parents.split()[:2]
-        if second not in descendants or first in descendants:
+    refs = git(repo, "for-each-ref", "--contains", commit, "--format=%(refname)").split()
+    if not refs:
+        return None
+    branches = list(dict.fromkeys(git(repo, "merge-base", "--independent", *refs).split()))
+    descendants = set(git(repo, "rev-list", "--ancestry-path", f"^{commit}", *branches).split())
+    merges = []
+    for branch in branches:
+        merge = entry_merge(repo, commit, branch, descendants)
+        if merge is None:
+            return None
+        merges.append(merge)
+    found: list[str] = []
+    for merge in dict.fromkeys(merges):
+        if any(other != merge and is_ancestor(repo, other, merge) for other in merges):
             continue
-        keys = ticket_keys(message)
-        return Attribution(tuple(keys), "the merge commit") if keys else None
-    return None
+        found += ticket_keys(git(repo, "log", "-1", "--format=%B", merge))
+    keys = list(dict.fromkeys(found))
+    return Attribution(tuple(keys), "the merge commit") if keys else None
+
+
+def entry_merge(repo: Path, commit: str, branch: str, descendants: set[str]) -> str | None:
+    """The merge on the branch's first-parent chain that brought the commit in, or None when
+    the commit is on that chain itself."""
+    entry = None
+    for sha in git(repo, "rev-list", "--first-parent", branch, f"^{commit}").split():
+        if sha not in descendants:
+            break
+        entry = sha
+    if entry is None or git(repo, "rev-parse", f"{entry}^1").strip() == commit:
+        return None
+    return entry
+
+
+def is_ancestor(repo: Path, older: str, newer: str) -> bool:
+    try:
+        git(repo, "merge-base", "--is-ancestor", older, newer)
+    except ValueError:
+        return False
+    return True

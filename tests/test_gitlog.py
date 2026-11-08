@@ -150,6 +150,36 @@ def test_a_commit_made_on_the_target_branch_is_not_blamed_on_a_later_merge(
     assert ticket_of(git_repo.path, hotfix) is None
 
 
+def test_a_hotfix_synced_into_a_feature_branch_is_not_blamed_on_it(git_repo):
+    git_repo.commit("init", {"a": "0"})
+    git_repo.git("checkout", "-q", "-b", "feature/SHOP-1-a")
+    feature = git_repo.commit("work on the feed", {"f": "f"})
+    git_repo.git("checkout", "-q", "main")
+    hotfix = git_repo.commit("hotfix typo", {"h": "h"})
+    git_repo.git("checkout", "-q", "feature/SHOP-1-a")
+    sync = "Merge branch 'main' into feature/SHOP-1-a"
+    git_repo.git("merge", "-q", "--no-edit", "-m", sync, "main")
+    git_repo.git("checkout", "-q", "main")
+    merge = "Merge branch 'feature/SHOP-1-a' into 'main'\n\nSHOP-1 feed"
+    git_repo.git("merge", "-q", "--no-ff", "-m", merge, "feature/SHOP-1-a")
+
+    assert ticket_of(git_repo.path, hotfix) is None
+    attribution = ticket_of(git_repo.path, feature)
+    assert attribution is not None
+    assert (attribution.candidates, attribution.found_in) == (("SHOP-1",), "the merge commit")
+
+    git_repo.git("checkout", "-q", "-b", "feature/SHOP-2-b", "main~1")
+    git_repo.commit("other work", {"o": "o"})
+    git_repo.git("merge", "-q", "--no-edit", "-m", "Merge branch 'main' into SHOP-2-b", "main")
+    git_repo.git("checkout", "-q", "main")
+    git_repo.commit("later work on main", {"l": "l"})
+
+    attribution = ticket_of(git_repo.path, feature)
+    assert attribution is not None
+    assert attribution.candidates == ("SHOP-1",)
+    assert ticket_of(git_repo.path, hotfix) is None
+
+
 def test_names_of_standards_are_not_ticket_keys(git_repo):
     sha = git_repo.commit("Read the feed as UTF-8, sign with SHA-256 per RFC-7515 - SHOP-412")
     attribution = ticket_of(git_repo.path, sha)
