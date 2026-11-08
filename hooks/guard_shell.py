@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: deny shell commands that destroy work, leak secrets or touch production.
+"""PreToolUse hook: deny commands that destroy work, leak secrets, touch production or the guard.
 
 It parses the Bash command, including chains, pipes, subshells, `bash -c`, `eval`, `xargs`,
 `sudo`/`env` prefixes and heredocs fed to a shell, and denies with the rule and a safe
 alternative: force-pushes and pushes that delete remote refs, `git reset --hard`/`clean -f`/
-`checkout .`/`checkout -f`/`restore .` outside the allowed temp dirs, `rm -r` and
-`find -delete`/`-exec rm` outside the allowed dirs (temp dirs, build and cache dirs in the
-project, `allowed_rm_dirs`), raw reads of secret files, connections to production database
-hosts, DROP/TRUNCATE in or piped into a database client command, and a `$(` never closed.
+`checkout .`/`checkout -f`/`restore .` and `git branch -D` outside the allowed temp dirs,
+`rm -r` and `find -delete`/`-exec rm` outside the allowed dirs (temp dirs, build and cache
+dirs in the project, `allowed_rm_dirs`), raw reads of secret files (also through `<`), copies
+of them, environment dumps, macOS keychain reads, connections to production database hosts,
+DROP/TRUNCATE in or piped into a database client command, and a `$(` never closed. Shell
+writes and Write/Edit/MultiEdit/NotebookEdit calls that change Claude Code settings, the
+guard's own settings, git hooks or installed plugins are denied too, as is `core.hooksPath`.
+Each denial appends a line without the command to `$HARNESS_HOME/guard-events.jsonl`.
 Settings: built-in defaults, then `$HARNESS_HOME/guard.json` (default
 `~/.claude/agent-harness/guard.json`), then the `guard` key of the project's
 `.claude/agent-harness.json`. It catches mistakes; it is not a sandbox against deliberate
@@ -23,6 +27,7 @@ import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePath
 from typing import Any, TextIO
@@ -63,6 +68,8 @@ LIST_KEYS = {
     "extra_deny",
 }
 REGEX_KEYS = {"prod_db_hosts", "safe_filters"}
+# Settings of other guard hooks that share this config; they validate their own.
+OTHER_HOOK_KEYS = {"runaway"}
 DEFAULT_RM_DIRS = ["node_modules", "var/cache", "dist", "build", "coverage", ".pytest_cache"]
 DEFAULT_RM_DIRS += ["__pycache__", ".mypy_cache", ".ruff_cache"]
 SCRATCHPADS = ["/tmp/claude-*", "/private/tmp/claude-*"]  # noqa: S108
@@ -98,7 +105,7 @@ WRAPPERS: dict[str, set[str]] = {
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 GREPS = {"grep", "egrep", "fgrep"}
 READERS = GREPS | {"cat", "head", "tail", "less", "more", "sed", "awk", "gawk", "strings"}
-READERS |= {"xxd", "base64", "rg", "bat", "nl", "tac", "jq"}
+READERS |= {"xxd", "base64", "rg", "bat", "nl", "tac", "jq", "od", "hexdump", "uuencode"}
 GREP_QUIET = {"-c", "-l", "-L", "-q", "--count", "--files-with-matches"}
 GREP_QUIET |= {"--files-without-match", "--quiet", "--silent"}
 GREP_LONG_VALUES = {"--regexp", "--file", "--max-count", "--after-context", "--before-context"}
@@ -112,6 +119,44 @@ DB_HOST_ENV = {"PGHOST", "MYSQL_HOST"}
 DESTRUCTIVE_SQL = re.compile(r"\b(?:DROP\s+(?:DATABASE|TABLE|SCHEMA)\b|TRUNCATE\b(?!\s*\())", re.I)
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
 WHOLE_TREE = {".", "./", "*", ":/", ":/.", ":/*", ":(top)", ":(top)."}
+CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"}
+CONFIG_CHANGES = {"--unset", "--unset-all", "--add", "--replace-all", "unset"}
+TARGET_VALUES = {"--target-directory", "--suffix"}
+RSYNC_VALUES = {"--rsh", "--filter", "--exclude", "--include", "--exclude-from", "--include-from"}
+RSYNC_VALUES |= {"--files-from", "--temp-dir", "--partial-dir", "--compare-dest", "--copy-dest"}
+RSYNC_VALUES |= {"--link-dest", "--backup-dir", "--suffix", "--chmod", "--chown", "--log-file"}
+RSYNC_VALUES |= {"--rsync-path", "--password-file", "--timeout", "--port", "--bwlimit"}
+# Per program: short options and long options that take a value.
+COPIERS: dict[str, tuple[str, set[str]]] = {
+    "cp": ("tS", TARGET_VALUES),
+    "mv": ("tS", TARGET_VALUES),
+    "ln": ("tS", TARGET_VALUES),
+    "install": ("tSmogB", TARGET_VALUES | {"--mode", "--owner", "--group"}),
+    "ditto": ("", {"--arch", "--bom"}),
+    "scp": ("cDFiJloPSX", set()),
+    "rsync": ("eBfTM", RSYNC_VALUES),
+}
+SECRET_COPIERS = {"cp", "mv", "install", "ditto", "scp", "rsync", "dd"}
+CHANGERS = {"rm", "unlink", "shred", "truncate", "chmod", "tee", "sponge"}
+WRITES = {">", ">>", ">|", "&>", "&>>", ">&", "<>"}
+SECRET_NAME = re.compile(
+    r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PASS|AUTH|CREDENTIAL)S?(?:_|$)", re.I
+)
+KEYCHAIN_READS = {"find-generic-password", "find-internet-password", "dump-keychain"}
+FILE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path"}
+FILE_TOOLS["NotebookEdit"] = "notebook_path"
+CUT_OPTIONS = {"-d": "-d", "--delimiter": "-d", "-f": "-f", "--fields": "-f"}
+REPO_GUARDS = ["*/.claude/settings.json", "*/.claude/settings.local.json"]
+REPO_GUARDS += ["*/.claude/agent-harness.json", "*/.git/hooks", "*/.git/hooks/*"]
+PRINT_PROCEED = (
+    "show key names or masked values instead (a pipe into `cut -d= -f1`, or a script that "
+    "parses the file and prints its keys), count or list matches with `grep -c`/`-l`/`-q`, "
+    "or pipe the output through a filter listed in safe_filters."
+)
+TAMPER_PROCEED = (
+    "leave it to the person and put the change you need in your report; a copy inside the "
+    "temp dir or scratchpad may be changed."
+)
 
 
 @dataclass
@@ -242,6 +287,8 @@ def load_config(environ: Mapping[str, str], project: Path | None) -> Config:
             warnings.append(f"{name} is not a JSON object")
             continue
         for key, value in data.items():
+            if key in OTHER_HOOK_KEYS:
+                continue
             if key not in DEFAULTS:
                 warnings.append(f"{name}: unknown key {key}")
                 continue
@@ -675,6 +722,93 @@ def shell_script(args: list[str]) -> tuple[bool, str | None]:
     return has_c, None
 
 
+def bare_env(words: list[str]) -> bool:
+    """Whether the words run `env` without a command, which prints every variable."""
+    i, found = 0, False
+    while i < len(words):
+        if ASSIGNMENT.match(words[i]) or words[i] in RESERVED:
+            i += 1
+            continue
+        program = PurePath(words[i]).name
+        if program not in WRAPPERS:
+            return False
+        found = found or program == "env"
+        i = skip_options(words, i + 1, WRAPPERS[program])
+        i += 1 if program == "timeout" else 0
+    return found
+
+
+def names_only(args: list[str]) -> bool:
+    """Whether `cut` keeps only what comes before the first `=`: variable or key names."""
+    values: dict[str, str] = {}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        name, _, value = arg.partition("=") if arg.startswith("--") else (arg[:2], "", arg[2:])
+        key = CUT_OPTIONS.get(name)
+        if key is None:
+            continue
+        if not value and i < len(args):
+            value, i = args[i], i + 1
+        values[key] = value
+    return values.get("-d") == "=" and values.get("-f") == "1" and "--complement" not in args
+
+
+def copy_paths(program: str, args: list[str]) -> tuple[list[str], list[str]]:
+    """The sources and the destinations of a copy, move or link."""
+    if program == "dd":
+        sources = [arg[3:] for arg in args if arg.startswith("if=")]
+        return sources, [arg[3:] for arg in args if arg.startswith("of=")]
+    short_values, long_values = COPIERS[program]
+    flags, operands = parse(args, short_values, long_values)
+    if "t" not in short_values or not flags & {"-t", "--target-directory"}:
+        return operands[:-1], operands[-1:]
+    named = [arg.partition("=")[2] for arg in args if arg.startswith("--target-directory=")]
+    return operands, named + [arg for arg in args if not arg.startswith("-")]
+
+
+def changed_paths(call: Call) -> list[str]:
+    """The paths a command writes, replaces, moves away or deletes, as far as its words tell."""
+    name, args = call.program, call.args
+    in_place = name == "sed" and any(
+        arg.startswith("--in-place") or short_flag(arg, "i", "efl") for arg in args
+    )
+    in_place = in_place or (name == "perl" and any(short_flag(a, "i", "eEIMmFdD") for a in args))
+    if name in CHANGERS or in_place:
+        return [arg for arg in args if not arg.startswith("-")]
+    if name != "dd" and name not in COPIERS:
+        return []
+    sources, destinations = copy_paths(name, args)
+    into = [str(PurePath(d, PurePath(s).name)) for d in destinations for s in sources]
+    return (sources if name == "mv" else []) + destinations + into
+
+
+def force_deletes(args: list[str]) -> bool:
+    if any(short_flag(arg, "D", "u") for arg in args):
+        return True
+    deletes = "--delete" in args or any(short_flag(arg, "d", "u") for arg in args)
+    return deletes and ("--force" in args or any(short_flag(arg, "f", "u") for arg in args))
+
+
+def sets_hooks_path(args: list[str]) -> bool:
+    keys = [i for i, arg in enumerate(args) if arg.lower() == "core.hookspath"]
+    if not keys or CONFIG_READS & set(args):
+        return False
+    value = any(not arg.startswith("-") for arg in args[keys[0] + 1 :])
+    return value or bool(CONFIG_CHANGES & set(args))
+
+
+def live_guards(environ: Mapping[str, str]) -> list[str]:
+    """Globs of guard files that are live wherever they are: user and harness settings, plugins."""
+    home = environ.get("HOME") or str(Path.home())
+    config = expand(environ.get("CLAUDE_CONFIG_DIR", "").strip(), environ)
+    config = config or str(PurePath(home, ".claude"))
+    files = [(str(harness_home(environ)), name) for name in ("guard.json", "memory.json")]
+    files += [(config, name) for name in ("settings.json", "plugins", "plugins/*")]
+    return [str(PurePath(glob.escape(os.path.realpath(d)), name)).lower() for d, name in files]
+
+
 def db_hosts(call: Call) -> list[str]:
     hosts = [value for name, value in call.env.items() if name in DB_HOST_ENV]
     args = call.args
@@ -714,7 +848,12 @@ class Denial:
 
 class Checker:
     def __init__(
-        self, config: Config, environ: Mapping[str, str], cwd: str | None, subagent: bool
+        self,
+        config: Config,
+        environ: Mapping[str, str],
+        cwd: str | None,
+        subagent: bool,
+        project: str | None = None,
     ) -> None:
         self.config = config
         self.environ = environ
@@ -723,6 +862,8 @@ class Checker:
         self.history: list[str | None] = [start]
         self.stack: list[tuple[list[str | None], list[str | None]]] = []
         self.subagent = subagent
+        self.project = os.path.realpath(project) if project else None
+        self.live = live_guards(environ)
 
     def script(self, text: str, depth: int = 0) -> Denial | None:
         if depth > MAX_DEPTH:
@@ -766,7 +907,11 @@ class Checker:
                 self.cwds, self.history = self.stack.pop()
             return None
         call = unwrap(item.words)
-        denial = self.call(call, item, items, index, depth) if call else None
+        denial = self.redirects(call, item, items, index)
+        if denial is None and call is None and bare_env(item.words):
+            denial = self.environment(" ".join(item.words), items, index)
+        if denial is None and call is not None:
+            denial = self.call(call, item, items, index, depth)
         if item.after == "||":
             self.cwds = capped(self.history)
         return denial
@@ -782,6 +927,9 @@ class Checker:
             return self.shell(call, command, depth)
         if name == "eval":
             return self.subshell(" ".join(call.args), depth + 1)
+        changed = self.tamper_denial(f"`{name}`", changed_paths(call))
+        if changed:
+            return changed
         if name == "rm":
             return self.rm(call, items, index)
         if name == "find" and find_deletes(call.args):
@@ -790,9 +938,63 @@ class Checker:
             return self.git(call, items, index)
         if name in READERS:
             return self.secret_read(call, command, items, index)
+        if name in SECRET_COPIERS:
+            return self.secret_copy(call)
         if name in DB_CLIENTS:
             return self.database(call, command, items, index)
-        return None
+        if name == "security":
+            return self.keychain(call)
+        return self.printed_env(call, items, index)
+
+    def redirects(
+        self, call: Call | None, command: Command, items: list[Command | str], index: int
+    ) -> Denial | None:
+        written = [target for op, target in command.redirects if op in WRITES]
+        denial = self.tamper_denial("a `>` redirect", written)
+        if denial is not None:
+            return denial
+        if call is not None and call.program in READERS:
+            return None
+        read = [target for op, target in command.redirects if op in ("<", "<>")]
+        secret = next((file for file in read if self.is_secret(file)), None)
+        if secret is None or self.safe_pipe(items, index):
+            return None
+        program = f"`{call.program}`" if call else "the command"
+        return Denial(
+            "secret-read",
+            f"`< {secret}` hands the file to {program}, which can print it, and the file "
+            "matches secret_globs",
+            PRINT_PROCEED,
+        )
+
+    def tamper_denial(self, how: str, paths: list[str]) -> Denial | None:
+        target = next((path for path in paths if self.guarded(path)), None)
+        if target is None:
+            return None
+        return Denial(
+            "guard-tampering",
+            f"{how} would change {target}, which holds Claude Code settings, the guard's "
+            "configuration, a git hook or an installed plugin",
+            TAMPER_PROCEED,
+        )
+
+    def guarded(self, target: str) -> bool:
+        resolved = [self.path(target, cwd) for cwd in self.cwds]
+        known = [path for path in resolved if path is not None]
+        candidates = [path.lower() for path in known]
+        if len(known) < len(resolved):
+            candidates.append(expand(target, self.environ).lower())
+        if any(fnmatchcase(c, pattern) for c in candidates for pattern in self.live):
+            return True
+        if not any(fnmatchcase("/" + c, pattern) for c in candidates for pattern in REPO_GUARDS):
+            return False
+        return len(known) < len(resolved) or not all(self.disposable(path) for path in known)
+
+    def disposable(self, path: str) -> bool:
+        """Inside the temp dir or scratchpad, and not the session's project."""
+        parents = [str(parent) for parent in PurePath(path).parents]
+        temp = any(fnmatchcase(p, pattern) for p in parents for pattern in self.config.rm_dirs)
+        return temp and not (self.project and PurePath(path).is_relative_to(self.project))
 
     def path(self, text: str, cwd: str | None) -> str | None:
         text = expand(text, self.environ)
@@ -900,10 +1102,27 @@ class Checker:
         if i >= len(args):
             return None
         sub, rest = args[i], args[i + 1 :]
+        if any("core.hookspath" in arg.lower() for arg in args[:i]) or (
+            sub == "config" and sets_hooks_path(rest)
+        ):
+            return Denial(
+                "guard-tampering",
+                "`git config core.hooksPath` (or `git -c core.hooksPath=…`) points git at other "
+                "hooks than the repository's",
+                "leave it to the person and put the change you need in your report.",
+            )
         if sub == "push":
             return self.push(rest)
         if sub in ("show", "log"):
             return self.git_secret(sub, rest, items, index)
+        if sub == "branch" and force_deletes(rest) and not all(self.inside(d) for d in dirs):
+            return Denial(
+                "branch-force-delete",
+                "`git branch -D` (or `--delete --force`) deletes a branch even when its commits "
+                "are on no other branch",
+                "delete it with `git branch -d`, which refuses an unmerged branch, or ask the "
+                "person. It is allowed in a repository inside the temp dir or scratchpad.",
+            )
         discard = self.discards(sub, rest, dirs)
         if discard is None or all(self.inside(d) for d in dirs):
             return None
@@ -1014,9 +1233,53 @@ class Checker:
             "secret-read",
             f"`{program}` would print {secret} raw into the transcript, and the file "
             "matches secret_globs",
-            "show key names or masked values instead (a script that parses the file and "
-            "prints its keys), count or list matches with `grep -c`/`-l`/`-q`, or pipe the "
-            "output through a filter listed in safe_filters.",
+            PRINT_PROCEED,
+        )
+
+    def secret_copy(self, call: Call) -> Denial | None:
+        sources, _ = copy_paths(call.program, call.args)
+        secret = next((file for file in sources if self.is_secret(file)), None)
+        if secret is None:
+            return None
+        return Denial(
+            "secret-copy",
+            f"`{call.program}` would copy {secret}, which matches secret_globs, where the "
+            "guard cannot follow it",
+            "leave the file where it is: start a new one from the example "
+            "(`cp .env.example .env`), or ask the person to copy it.",
+        )
+
+    def printed_env(self, call: Call, items: list[Command | str], index: int) -> Denial | None:
+        operands = [arg for arg in call.args if not arg.startswith("-")]
+        printenv = call.program == "printenv" and (
+            not operands or any(SECRET_NAME.search(name) for name in operands)
+        )
+        export = call.program == "export" and set(call.args) <= {"-p"}
+        if not printenv and not export:
+            return None
+        return self.environment(" ".join([call.program, *call.args]), items, index)
+
+    def environment(self, text: str, items: list[Command | str], index: int) -> Denial | None:
+        if self.safe_pipe(items, index):
+            return None
+        return Denial(
+            "env-dump",
+            f"`{text}` prints environment variables with their values, which hold tokens "
+            "and passwords",
+            "list the names with `env | cut -d= -f1`, or check that a variable is set without "
+            'printing it (`test -n "$NAME"`, `printenv NAME | wc -c`).',
+        )
+
+    def keychain(self, call: Call) -> Denial | None:
+        i = skip_options(call.args, 0, {"-p"})
+        sub = call.args[i] if i < len(call.args) else ""
+        if sub not in KEYCHAIN_READS:
+            return None
+        return Denial(
+            "keychain-read",
+            f"`security {sub}` reads the macOS keychain, which can print a stored password",
+            "let the tool that needs the credential read it itself, or ask the person for "
+            "what you need.",
         )
 
     def is_secret(self, file: str) -> bool:
@@ -1047,6 +1310,8 @@ class Checker:
             return False
         call = unwrap(following.words)
         if call and call.program == "wc":
+            return True
+        if call and call.program == "cut" and names_only(call.args):
             return True
         if call and call.program in GREPS and reader_files(call.program, call.args) is None:
             return True
@@ -1091,25 +1356,58 @@ def deny(denial: Denial, warnings: list[str]) -> dict[str, Any]:
     }
 
 
-def decision(event: dict[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
-    if event.get("tool_name") != "Bash":
-        return None
-    command = (event.get("tool_input") or {}).get("command")
+def check(event: dict[str, Any], environ: Mapping[str, str]) -> tuple[Denial | None, list[str]]:
+    """The denial for the tool call, if any, and the guard config warnings."""
+    tool = event.get("tool_name")
+    if tool != "Bash" and tool not in FILE_TOOLS:
+        return None, []
+    command = (event.get("tool_input") or {}).get(FILE_TOOLS.get(tool, "command"))
     if not isinstance(command, str) or not command.strip():
-        return None
+        return None, []
     cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
     project_dir = environ.get("CLAUDE_PROJECT_DIR") or cwd
     config = load_config(environ, Path(project_dir) if project_dir else None)
     subagent = bool(event.get("agent_type"))
     if config.scope != "all" and not subagent:
-        return None
-    denial = Checker(config, environ, cwd or project_dir, subagent).script(command)
+        return None, config.warnings
+    checker = Checker(config, environ, cwd or project_dir, subagent, project_dir)
+    if tool != "Bash":
+        return checker.tamper_denial(f"`{tool}`", [command]), config.warnings
+    denial = checker.script(command)
     for pattern, reason in config.extra_deny:
         if denial is None and pattern.search(command):
             denial = Denial(
                 "extra_deny", reason.rstrip("."), "change the command or ask the person."
             )
-    return deny(denial, config.warnings) if denial else None
+    return denial, config.warnings
+
+
+def decision(event: dict[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
+    denial, warnings = check(event, environ)
+    return deny(denial, warnings) if denial else None
+
+
+def log_guard_event(
+    environ: Mapping[str, str], event: Mapping[str, Any], hook: str, rule: str, decision: str
+) -> None:
+    """Append one line to `$HARNESS_HOME/guard-events.jsonl`; best effort, never the command."""
+    line = {
+        "time": datetime.now(UTC).isoformat(timespec="seconds"),
+        "hook": hook,
+        "session": event.get("session_id"),
+        "agent_id": event.get("agent_id"),
+        "agent_type": event.get("agent_type"),
+        "tool": event.get("tool_name"),
+        "rule": rule,
+        "decision": decision,
+    }
+    try:
+        path = harness_home(environ) / "guard-events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as log:
+            log.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception as error:
+        print(f"{hook} could not log the guard event: {error!r}", file=sys.stderr)
 
 
 def main(
@@ -1118,15 +1416,18 @@ def main(
     environ: Mapping[str, str] = os.environ,
 ) -> int:
     try:
-        verdict = decision(json.load(stdin), environ)
+        event = json.load(stdin)
+        denial, warnings = check(event, environ)
     except Exception as error:
         print(
             f"guard_shell.py allowed the command after an internal error: {error!r}",
             file=sys.stderr,
         )
         return 0
-    if verdict is not None:
-        json.dump(verdict, stdout)
+    if denial is None:
+        return 0
+    json.dump(deny(denial, warnings), stdout)
+    log_guard_event(environ, event, "guard_shell", denial.rule, "deny")
     return 0
 
 
