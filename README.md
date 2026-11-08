@@ -403,6 +403,64 @@ can be edited after creation; the 150-ticket sample gives wide intervals (about 
 the process note given to the LLMs names the change date, which a real estimator would also
 be told.
 
+## Measuring the team (not just the estimator)
+
+The backtest covers only the reference class mode, because old tickets have no plans. The
+bottom-up mode, the analyst and the reviewer are measured going forward instead, from what the
+plugin keeps for each ticket in `~/.claude/agent-harness/tickets/<KEY>/` (`HARNESS_HOME`
+moves the root): the analysis, the estimate and the review the agents returned, and what the
+retro adds to them. Run the commands from a checkout of this repository.
+
+```bash
+# After the work is logged: freeze the ticket as an eval case with the time it took
+uv run harness-eval export-case SHOP-412 --source measured \
+    --actual-part implementation=1.5 verification=0.5 release=0.25 --repo ../shop ../platform
+uv run harness-eval eval                       # errors over all exported cases
+
+# In the retro: what the person did with each review finding
+uv run harness-eval review-finding SHOP-412 F1 --disposition accepted
+uv run harness-eval review-finding SHOP-412 F2 F3 --disposition rejected --note "style only"
+
+# A defect reached production: link it to the ticket of the commit that caused it
+uv run harness-eval escaped --commit 3f2a9c1 --repo ../shop --source sentry --ref 4711 \
+    --summary "Rounded price off by a cent"
+uv run harness-eval escaped --commit 3f2a9c1 --repo ../shop --case incident-12-http-5xx.yaml
+
+uv run harness-eval metrics --repo ../shop ../platform          # or --json
+```
+
+- **`export-case KEY`** writes `$HARNESS_HOME/eval-cases/KEY.json`: the estimate and the
+  analysis as the agents returned them, and the actual time. Give it per part kind
+  (`--actual-part`, kinds `implementation`, `verification` and `release`), as a total
+  (`--actual-total`, by default the sum of the parts) or both, and say where it comes from
+  (`--source measured|worklog`). With `--repo`, it also records the diff of the commits on any
+  branch whose message names the key (`--grep` for another term): the files, the lines added
+  and removed, and how many added lines are tests (`--test-pattern`, by default `tests/`,
+  `spec/`, `*Test.php`, `*_test.py` and `*.spec.ts`). It also writes `outcome.json` into the
+  ticket directory.
+- **`eval [DIR]`** reports, for the total by estimate mode and for each part kind, the mean
+  and the median absolute error in hours and the bias: estimate minus actual, so a positive
+  bias means the estimates were too high. The total is computed from the parts (or the
+  reference median) plus the adjustments, not taken from the model. The report has no ticket
+  keys, so it can be published like [`results/`](results/).
+- **`metrics`** measures the analyst by the files of its plan against the files that changed:
+  precision is the share of planned files that changed, recall the share of changed files the
+  plan named. The changed files come from the commits that name the key in the `--repo`
+  repositories, else from the exported case, else from the files the implementer reported. It
+  measures the reviewer by its findings per severity and disposition, the acceptance rate
+  (accepted / (accepted + rejected)), and the defects that reached production. A ticket with
+  a review and an escaped defect is marked *reviewer passed, defect escaped*. The rows name
+  ticket keys: keep this output private.
+- **`review-finding KEY F1 … --disposition accepted|rejected|deferred`** records in
+  `review.json` what the person did with a finding, with an optional `--note`.
+- **`escaped --commit SHA --repo PATH`** finds the ticket key in the commit message, else in
+  the first merge commit that brought the commit in (a merge request's merge commit carries
+  its branch name and title); `--ticket KEY` when neither names one. It appends the defect to
+  the ticket's `escaped.json`, once per commit and reference. `--case` takes an
+  [incident-scout](https://github.com/bondie/incident-scout) case file (`scout export-case`):
+  its id becomes the reference and its reviewed cause the summary. A case names no commit or
+  deployment, so `--commit` is still needed.
+
 ## Design decisions
 
 - **A plugin, not a project `.claude/` folder.** The same team works in every repository,

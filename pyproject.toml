@@ -15,6 +15,7 @@ classifiers = [
 dependencies = [
     "httpx>=0.27",
     "numpy>=2.0",
+    "pyyaml>=6.0",
     "scipy>=1.13",
     "ticket-precedent",
 ]
@@ -32,6 +33,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "scipy-stubs>=1.13",
+    "types-pyyaml>=6.0",
 ]
 
 [build-system]

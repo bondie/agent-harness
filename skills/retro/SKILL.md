@@ -19,21 +19,26 @@ listed in `index.jsonl`), its structured block (`analysis.json`, `estimate.json`
 `review.json`, `implementation.json`) and the quality gate result (`gates.json`). Reconstruct
 from the conversation only what is missing there.
 
-- **Estimate:** what the estimator said (the hours, per part when it estimated
-  bottom-up), from this conversation or from the comment where it was posted.
+- **Estimate:** the estimator's hours, per part when it estimated bottom-up (`estimate.json`).
 - **Actual time:** the person's own logged hours on the ticket from the tracker's worklogs,
   and the total if others logged too. Ask the person when the worklogs are not readable.
 - **Size of the change:** for every repository the ticket touched, `git log --all
   --author=<person> --grep=<KEY> --numstat`: commits, files, lines added and removed, and how
   many of the added lines are tests.
-- **Plan against reality:** the files in the analyst's implementation plan against the files
+- **Plan against reality:** the files in the analyst's plan (`analysis.json`) against the files
   that actually changed: what the plan missed, what it planned that was not needed.
 - **Implementation:** the implementer's "Where the time went", failing test runs, steps the
   lead had to do by hand.
-- **Review:** each finding and what the person did with it: fixed, rejected as noise, deferred.
+- **Review:** each finding in `review.json` and what the person did with it: accepted (fixed),
+  rejected as noise or deferred.
 - **Corrections:** anything the person said about an agent's output during the ticket.
 
 Use numbers, not impressions. When a fact is missing, say so instead of guessing.
+
+**Keep the numbers.** Once the facts are settled, record what the person did with each review
+finding (`harness-eval review-finding <KEY> F1 … --disposition accepted|rejected|deferred`)
+and freeze the ticket as an eval case (`harness-eval export-case <KEY> --source
+measured|worklog --actual-part implementation=… verification=… release=… --repo <paths>`).
 
 ## 2. Have each agent propose its lessons
 
