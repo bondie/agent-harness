@@ -957,7 +957,7 @@ class Checker:
             return None
         read = [target for op, target in command.redirects if op in ("<", "<>")]
         secret = next((file for file in read if self.is_secret(file)), None)
-        if secret is None or self.safe_pipe(items, index):
+        if secret is None or self.safe_pipe(items, index) or self.safe_redirect(call, command):
             return None
         program = f"`{call.program}`" if call else "the command"
         return Denial(
@@ -1207,7 +1207,8 @@ class Checker:
         files = reader_files(call.program, call.args)
         if files is None:
             return None
-        files += [target for op, target in command.redirects if op == "<"]
+        if not self.safe_redirect(call, command):
+            files += [target for op, target in command.redirects if op == "<"]
         return self.secret_denial(call.program, files, items, index)
 
     def git_secret(
@@ -1306,16 +1307,21 @@ class Checker:
         following = items[index + 1] if index + 1 < len(items) else None
         if not isinstance(command, Command) or command.after not in PIPES:
             return False
-        if not isinstance(following, Command):
-            return False
-        call = unwrap(following.words)
+        return isinstance(following, Command) and self.safe_filter(following)
+
+    def safe_redirect(self, call: Call | None, command: Command) -> bool:
+        # Under xargs, xargs reads the file and turns its content into arguments.
+        return call is not None and not call.via_xargs and self.safe_filter(command)
+
+    def safe_filter(self, command: Command) -> bool:
+        call = unwrap(command.words)
         if call and call.program == "wc":
             return True
         if call and call.program == "cut" and names_only(call.args):
             return True
         if call and call.program in GREPS and reader_files(call.program, call.args) is None:
             return True
-        text = " ".join(following.words)
+        text = " ".join(command.words)
         return any(pattern.search(text) for pattern in self.config.safe_filters)
 
     def database(
@@ -1388,11 +1394,16 @@ def decision(event: dict[str, Any], environ: Mapping[str, str]) -> dict[str, Any
 
 
 def log_guard_event(
-    environ: Mapping[str, str], event: Mapping[str, Any], hook: str, rule: str, decision: str
+    environ: Mapping[str, str],
+    event: Mapping[str, Any],
+    hook: str,
+    rule: str,
+    decision: str,
+    now: datetime | None = None,
 ) -> None:
     """Append one line to `$HARNESS_HOME/guard-events.jsonl`; best effort, never the command."""
     line = {
-        "time": datetime.now(UTC).isoformat(timespec="seconds"),
+        "time": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
         "hook": hook,
         "session": event.get("session_id"),
         "agent_id": event.get("agent_id"),

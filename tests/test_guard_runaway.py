@@ -319,7 +319,7 @@ def test_a_failed_log_write_keeps_the_decision(tmp_path, capsys):
     assert denied(run, [TEST, TEST, TEST]) == [2]
     run.clock += 600
     assert run.post()
-    assert capsys.readouterr().err.count("guard_runaway.py could not log a guard event") == 2
+    assert capsys.readouterr().err.count("guard_runaway could not log the guard event") == 2
 
 
 def test_long_run_warns_once_after_the_threshold(tmp_path):

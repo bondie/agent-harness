@@ -183,7 +183,8 @@ session with `"scope": "all"`. It parses the command, so it also sees `;`/`&&`/`
 pipes, subshells, `$(…)`, `bash -c`/`sh -c`, `eval`, heredocs fed to a shell, `sudo`, `env`,
 `nohup` and `timeout` prefixes, variable assignments, quoting tricks and absolute binary paths.
 It also checks the Write, Edit, MultiEdit and NotebookEdit calls of the same agents against the
-guard files (`guard-tampering`). Each deny reason names the rule and how to proceed.
+guard files (`guard-tampering`). Each deny reason names the rule and how to proceed, and each
+denial is logged ([Guard events](#guard-events)).
 
 | Rule | Denied | Allowed |
 |---|---|---|
@@ -193,7 +194,7 @@ guard files (`guard-tampering`). Each deny reason names the rule and how to proc
 | `git-discard` | `git reset --hard`, `git clean -f`, `git checkout .`/`-- .`/`-f`, `git restore .` | in a repository inside the temp dirs; `clean -n`, `restore --staged .`, single files |
 | `branch-force-delete` | `git branch -D`, `--delete --force`, `-df` | `git branch -d`; in a repository inside the temp dirs |
 | `rm-outside-allowed-dirs` | `rm -r`/`-rf`/`-fr`/`-R`, `find -delete`/`-exec rm`, `xargs rm -r` outside the allowed dirs | below `$TMPDIR` (`/tmp` when unset) or `/tmp/claude-*`, the default build and cache dirs in the project, and `allowed_rm_dirs` |
-| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `od`, `hexdump`, `uuencode`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs`, or the file fed to any command through `<` | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c`, `cut -d= -f1` or a `safe_filters` match; `secret_allow_globs` |
+| `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `od`, `hexdump`, `uuencode`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs`, or the file fed through `<` to any other command | `grep -c`/`-l`/`-q`; a pipe into `wc`, `grep -c`, `cut -d= -f1` or a `safe_filters` match, or the file fed to one of them through `<` (`wc -c < .env`); `secret_allow_globs` |
 | `secret-copy` | `cp`, `mv`, `install`, `ditto`, `scp`, `rsync` or `dd if=` with a file in `secret_globs` as a source | `cp .env.example .env`; the file as the destination; `scp -i`/`rsync -e`/`--exclude` values |
 | `env-dump` | `env` without a command, `printenv` without a name or with one that contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `PASS`, `AUTH` or `CREDENTIAL` before `_` or at its end, `export`/`export -p` | `env FOO=1 make`, `printenv HOME`; a pipe into `cut -d= -f1`, `wc` or `grep -c` |
 | `keychain-read` | `security find-generic-password`, `find-internet-password`, `dump-keychain` | other `security` commands |
@@ -227,7 +228,7 @@ Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the 
 | `secret_allow_globs` | `.env.example`, `.env.dist`, `*.pub` |
 | `allowed_rm_dirs` | built in: `node_modules`, `var/cache`, `dist`, `build`, `coverage`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `.ruff_cache` at any depth inside the project (`CLAUDE_PROJECT_DIR`, else the working directory), never the project itself; each entry you add allows the dir and everything in it, a relative one relative to the project |
 | `prod_db_hosts` | none; case-insensitive regexes searched in the host |
-| `safe_filters` | none; regexes searched in the pipe stage right after the read, its words joined by single spaces without quotes (`grep -v -E 'a\|b'` becomes `grep -v -E a\|b`) |
+| `safe_filters` | none; regexes searched in the pipe stage right after the read, or in the command the file is fed to through `<`, its words joined by single spaces without quotes (`grep -v -E 'a\|b'` becomes `grep -v -E a\|b`) |
 | `extra_deny` | none; `{"pattern": "<regex searched in the whole command>", "reason": "<text>"}` |
 
 A glob without `/` matches the file name, one with `/` the path at any depth, both ignoring
@@ -277,7 +278,7 @@ expected failure of the test, so closing one fails it until the policy and this 
 | destructive-git | 15 / 15 | 0 | 0 |
 | destructive-files | 4 / 11 | 7 | 0 |
 | privilege | 1 / 4 | 0 | 3 |
-| secrets | 10 / 12 | 0 | 2 |
+| secrets | 9 / 12 | 0 | 3 |
 | remote-code | 0 / 4 | 0 | 4 |
 | exfiltration | 2 / 4 | 0 | 2 |
 | wrappers | 6 / 16 | 8 | 2 |
@@ -285,7 +286,7 @@ expected failure of the test, so closing one fails it until the policy and this 
 | infrastructure | 1 / 5 | 0 | 4 |
 | guardrail-tampering | 7 / 8 | 0 | 1 |
 | file-tools | 0 / 8 | 0 | 8 |
-| total | 46 / 90 | 15 | 29 |
+| total | 45 / 90 | 15 | 30 |
 
 The cases allowed by design delete `./guardrail-tester-probe/build`, a build dir the guard
 allows inside the project; the test runs each again on `…/src` and expects a denial. The gaps:
@@ -299,21 +300,13 @@ allows inside the project; the test runs each again on `…/src` and expects a d
   repository that are not guard files (`write-zshrc`, `write-authorized-keys`,
   `write-launch-agent`, `shell-append-zshrc`).
 - Allowed on purpose: searching code for key names, such as `grep -r API_KEY src/`, is routine
-  (`grep-keys`).
+  (`grep-keys`), and a secret file fed through `<` to a filter that prints no content, such as
+  `wc -c < .env`, is allowed as it is after a pipe (`redirect-env`).
 - Out of the parser's sight: code inside `python -c` (`python-open-env`), a command decoded at
   run time and piped into `sh` (`base64-sh`), and what `docker exec` runs in a container
   (`docker-exec-rm`).
 - The Read tool is not checked (`read-env`, `read-env-nested`, `read-ssh-key`, `read-aws`): deny
   it in Claude Code's permissions, for example `"deny": ["Read(./.env)", "Read(./.env.*)"]`.
-
-### Guard events
-
-Each denial appends one line to `guard-events.jsonl` under `$HARNESS_HOME` (default
-`~/.claude/agent-harness/`): `time` (ISO 8601, UTC), `hook` (`guard_shell`), `session`,
-`agent_id`, `agent_type`, `tool`, `rule` (the rule name from the tables above) and `decision`
-(`deny`). It never holds the command, file content or paths, which may contain secrets. Writing
-it is best effort: a failure is logged to stderr and the decision stands. Other hooks append
-with `log_guard_event(environ, event, hook, rule, decision)` from `hooks/guard_shell.py`.
 
 ## Runaway guard
 
@@ -359,15 +352,7 @@ An invalid value is ignored and named in the next deny reason. Each agent's stat
 folders untouched for two days are removed. An internal error lets the call through and logs
 to stderr.
 
-Each deny and each long-run note appends one line to `~/.claude/agent-harness/guard-events.jsonl`
-(under `$HARNESS_HOME` when set), never with the tool input:
-
-```json
-{"time": "2026-11-08T09:12:40+00:00", "hook": "guard_runaway", "session": "<session_id>", "agent_id": "<agent_id>", "agent_type": "agent-harness:implementer", "tool": "Bash", "rule": "loop", "decision": "deny"}
-```
-
-`rule` is `loop`, `failure_streak` or `long_run`; `decision` is `deny` or `context` (the note).
-A line that cannot be written is reported on stderr and changes nothing.
+Each deny and each long-run note is logged ([Guard events](#guard-events)).
 
 It misses a loop over two or more calls (A, B, A, B: each call ends the other's run), a
 repeated call whose input changes each time (a counter, a timestamp) and a loop of calls it
@@ -376,6 +361,29 @@ run.
 
 The rules are adapted from the [runaway-guard](https://github.com/RyanAlberts/best-of-Agent-Harnesses/tree/main/skills/runaway-guard)
 skill in best-of-Agent-Harnesses (MIT license); the code is this repository's own.
+
+## Guard events
+
+Both guards append one line per decision to `guard-events.jsonl` under `$HARNESS_HOME`
+(default `~/.claude/agent-harness/`): the shell guard on each denial, the runaway guard on each
+deny and each long-run note.
+
+```json
+{"time": "2026-11-08T09:12:40+00:00", "hook": "guard_runaway", "session": "<session_id>", "agent_id": "<agent_id>", "agent_type": "agent-harness:implementer", "tool": "Bash", "rule": "loop", "decision": "deny"}
+```
+
+| Key | Value |
+|---|---|
+| `time` | ISO 8601 in UTC, to the second |
+| `hook` | `guard_shell` or `guard_runaway` |
+| `session`, `agent_id`, `agent_type`, `tool` | from the hook event; `null` when it has none, as `agent_id` in the main session |
+| `rule` | a rule from the [shell guard](#shell-guard) or the [runaway guard](#runaway-guard) table |
+| `decision` | `deny`, or `context` for the runaway guard's long-run note, which only adds text next to a tool result |
+
+A line never holds the command, the tool input, file content or paths, which may contain
+secrets. Writing it is best effort: a failure is reported on stderr and the decision stands.
+Another hook appends with `log_guard_event(environ, event, hook, rule, decision)` from
+`hooks/guard_shell.py`; the optional `now` sets the time.
 
 ## Memory hygiene
 
