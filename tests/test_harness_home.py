@@ -11,7 +11,6 @@ HOOK_MODULES = (
     "quality_gate",
     "guard_shell",
     "guard_memory_writes",
-    "guard_runaway",
 )
 DEFAULT = Path("/work/home/.claude/agent-harness")
 
@@ -38,4 +37,7 @@ def test_the_hooks_and_the_package_resolve_the_same_harness_home(environ, expect
     assert artifacts.harness_home() == expected
     assert memory.harness_home() == expected
     assert [hook.harness_home(environ) for hook in hooks] == [expected] * len(hooks)
+    runaway = importlib.import_module("guard_runaway")
+    state = runaway.state_path({"session_id": "s", "agent_id": "a"}, environ)
+    assert state == expected / "runaway" / "s" / "a.json"
     assert importlib.import_module("log_agent_runs").log_path({}).parent == DEFAULT
