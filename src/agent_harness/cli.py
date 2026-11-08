@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import json
 import sys
 from collections.abc import Callable, Sequence
@@ -20,6 +19,7 @@ from .artifacts import (
     harness_home,
     incident_case,
     one_line,
+    pick_ticket,
     read_object,
     set_disposition,
     ticket_dir,
@@ -28,7 +28,15 @@ from .artifacts import (
 )
 from .baselines import EraScaledMedian, Estimator, HumanEstimate, NeighbourMedian
 from .dataset import load_targets, sample
-from .gitlog import DEFAULT_TEST_PATTERNS, changes, diff, resolve, ticket_of
+from .gitlog import (
+    DEFAULT_TEST_PATTERNS,
+    FileChange,
+    changes,
+    changes_by_term,
+    diff,
+    resolve,
+    ticket_of,
+)
 from .llm import STRUCTURED, WITH_MEMORY, Backend, ClaudeCode, LLMEstimator, Ollama
 from .memory import Memory, load_memory
 from .report import report
@@ -36,6 +44,7 @@ from .runner import load_run, run
 
 BASELINES = ("neighbour-median", "recent-median", "era-scaled-median", "human")
 LLM_CONTEXTS = ("llm-none", "llm-keyword", "llm-hybrid", "llm-hybrid-recent")
+REV_HELP = "read only the commits reachable from this revision, e.g. main (default: all refs)"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +136,7 @@ def _team_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]
         "--repo", nargs="+", action="extend", default=[], type=Path, help="read the diff here"
     )
     cmd.add_argument("--grep", help="text the commit messages name (default: the key)")
+    cmd.add_argument("--rev", help=REV_HELP)
     cmd.add_argument(
         "--test-pattern",
         action="append",
@@ -151,6 +161,7 @@ def _team_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]
         type=Path,
         help="take each ticket's changed files from the commits naming its key here",
     )
+    cmd.add_argument("--rev", help=REV_HELP)
     cmd.add_argument("--json", action="store_true", help="JSON instead of Markdown")
     cmd.set_defaults(handler=_metrics)
 
@@ -160,6 +171,13 @@ def _team_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]
     cmd.add_argument("key")
     cmd.add_argument("finding", nargs="+", help="finding ids, e.g. F1")
     cmd.add_argument("--disposition", choices=DISPOSITIONS, required=True)
+    cmd.add_argument(
+        "--round",
+        type=int,
+        dest="round_",
+        metavar="N",
+        help="review round, 1 first (default: the only round with these ids)",
+    )
     cmd.add_argument("--note", help="why, in one line")
     cmd.set_defaults(handler=_review_finding)
 
@@ -270,7 +288,7 @@ def _export_case(args: argparse.Namespace) -> int:
     found_diff = None
     if args.repo:
         term = args.grep or args.key
-        found = [change for repo in args.repo for change in changes(repo, term)]
+        found = [change for repo in args.repo for change in changes(repo, term, args.rev)]
         if not found:
             print(f"warning: no commit names {term} in the repositories", file=sys.stderr)
         found_diff = diff(found, args.test_pattern or DEFAULT_TEST_PATTERNS).as_json()
@@ -280,8 +298,11 @@ def _export_case(args: argparse.Namespace) -> int:
     write_json(target, case)
     outcome = {"ticket": args.key, "actual": actual, "diff": found_diff, "exported_at": _now()}
     write_json(directory / "outcome.json", outcome)
-    estimated = prospective.estimate_total(estimate)
-    print(f"{args.key}: estimate {estimated:g} h, actual {actual['total']:g} h; wrote {target}")
+    estimated = prospective.case_total(case)
+    kept = " (stated total, the estimate check failed)" if case.get("check_errors") else ""
+    print(
+        f"{args.key}: estimate {estimated:g} h{kept}, actual {actual['total']:g} h; wrote {target}"
+    )
     return 0
 
 
@@ -291,13 +312,24 @@ def _eval(args: argparse.Namespace) -> int:
     return 0
 
 
-def _files_in(repos: Sequence[Path], key: str) -> list[str]:
-    return list(diff([change for repo in repos for change in changes(repo, key)]).files)
+def files_by_key(
+    repos: Sequence[Path], keys: Sequence[str], rev: str | None
+) -> dict[str, list[str]]:
+    """The files the commits naming each key changed, one `git log` per repository."""
+    found: dict[str, list[FileChange]] = {key: [] for key in keys}
+    for repo in repos:
+        for key, repo_changes in changes_by_term(repo, keys, rev).items():
+            found[key] += repo_changes
+    return {key: list(diff(key_changes).files) for key, key_changes in found.items()}
 
 
 def _metrics(args: argparse.Namespace) -> int:
-    from_git = functools.partial(_files_in, args.repo) if args.repo else None
-    metrics = team.collect(ticket_dirs(), from_git)
+    directories = ticket_dirs()
+    from_git = None
+    if args.repo:
+        files = files_by_key(args.repo, [directory.name for directory in directories], args.rev)
+        from_git = files.__getitem__
+    metrics = team.collect(directories, from_git)
     if args.json:
         print(json.dumps(team.as_json(metrics), indent=2, ensure_ascii=False))
         return 0
@@ -306,7 +338,9 @@ def _metrics(args: argparse.Namespace) -> int:
 
 
 def _review_finding(args: argparse.Namespace) -> int:
-    updated = set_disposition(ticket_dir(args.key), args.finding, args.disposition, args.note)
+    updated = set_disposition(
+        ticket_dir(args.key), args.finding, args.disposition, args.note, args.round_
+    )
     for finding in updated:
         print(f"{args.key} {finding['id']}: {finding['disposition']}")
     return 0
@@ -323,7 +357,7 @@ def _escaped(args: argparse.Namespace) -> int:
                 f"Neither {commit[:12]} nor the merge that brought it in names a ticket; "
                 "give --ticket KEY"
             )
-        key, found_in = attribution.ticket, attribution.found_in
+        key, found_in = pick_ticket(attribution.candidates), attribution.found_in
     directory = ticket_dir(key)
     entry = {
         "commit": commit,

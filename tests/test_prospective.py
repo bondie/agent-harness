@@ -5,6 +5,7 @@ import pytest
 
 from agent_harness.estimate_check import round_half as round_half_hour
 from agent_harness.prospective import (
+    KEPT,
     MODES,
     PART_KINDS,
     actual,
@@ -133,7 +134,7 @@ def test_no_pairs_no_errors():
     assert errors([]) is None
 
 
-def random_case(rng, index):
+def random_case(rng, index, failures=False):
     mode = MODES[int(rng.integers(len(MODES)))]
     kinds = some(rng, PART_KINDS) or (list(PART_KINDS[:1]) if mode == "bottom-up" else [])
     estimate = {
@@ -142,8 +143,10 @@ def random_case(rng, index):
         "reference_median": half_hours(rng) + 0.5 if mode == "reference" else None,
         "parts": [part(kind, half_hours(rng, 8)) for kind in kinds for _ in range(2)],
         "adjustments": [adjustment(half_hours(rng, 2)) for _ in range(int(rng.integers(0, 3)))],
-        "total": 0,
+        "total": half_hours(rng) + 0.5,
     }
+    if failures and rng.random() < 0.3:
+        estimate["adjustments"].append({"hours": 1.0, "reason": "gut feeling", "citation": ""})
     measured = {kind: half_hours(rng, 8) for kind in some(rng, PART_KINDS)}
     total = sum(measured.values()) or half_hours(rng) + 0.5
     return eval_case(
@@ -151,8 +154,14 @@ def random_case(rng, index):
     )
 
 
+def brute_failed(case):
+    return any(not item["citation"] for item in case["estimate"]["adjustments"])
+
+
 def brute_case_total(case):
     estimate = case["estimate"]
+    if brute_failed(case):
+        return estimate["total"]
     extra = sum(item["hours"] for item in estimate["adjustments"])
     if estimate["mode"] == "reference":
         return brute_round(estimate["reference_median"] + extra)
@@ -171,7 +180,9 @@ def row(label, expected):
 @pytest.mark.parametrize("seed", range(4))
 def test_report_rows_match_brute_force_groups(seed):
     rng = np.random.default_rng(seed)
-    cases = [random_case(rng, index) for index in range(30)]
+    cases = [random_case(rng, index, failures=True) for index in range(30)]
+    failed = [case for case in cases if brute_failed(case)]
+    checked = [case for case in cases if not brute_failed(case)]
 
     text = report(cases)
 
@@ -179,12 +190,18 @@ def test_report_rows_match_brute_force_groups(seed):
         pairs = [(brute_case_total(case), case["actual"]["total"]) for case in subset]
         return brute_errors(pairs) if pairs else None
 
-    assert row("all", total_errors(cases)) in text
+    assert failed
+    assert all(case["check_errors"] for case in failed)
+    assert not any("check_errors" in case for case in checked)
+    assert row("all", total_errors(checked)) in text
+    assert row(KEPT, total_errors(failed)) in text
     for mode in MODES:
-        assert row(mode, total_errors([c for c in cases if c["estimate"]["mode"] == mode])) in text
+        assert (
+            row(mode, total_errors([c for c in checked if c["estimate"]["mode"] == mode])) in text
+        )
     for kind in PART_KINDS:
         pairs = []
-        for case in cases:
+        for case in checked:
             if case["estimate"]["parts"] and kind in case["actual"]["parts"]:
                 estimated = 0.0
                 for item in case["estimate"]["parts"]:
@@ -192,7 +209,31 @@ def test_report_rows_match_brute_force_groups(seed):
                         estimated += item["hours"]
                 pairs.append((estimated, case["actual"]["parts"][kind]))
         assert row(kind, brute_errors(pairs) if pairs else None) in text
-    assert "30 cases, actual time from: measured" in text
+    assert f"30 cases, {len(failed)} of them kept after the estimate check failed" in text
+    assert "actual time from: measured" in text
+
+
+def test_a_case_the_check_rejects_keeps_its_stated_total_and_errors():
+    estimate = {
+        "mode": "reference",
+        "reference_median": 2.0,
+        "adjustments": [{"hours": 1, "reason": "gut", "citation": ""}],
+        "total": 3.0,
+    }
+    case = eval_case("SHOP-1", estimate, None, actual(2.0, [], "worklog"), None)
+    assert case["check_errors"]
+    assert "citation" in case["check_errors"][0]
+    assert f"| {KEPT} | 1 | 1.00 |" in report([case])
+
+
+def test_a_rejected_estimate_without_a_stated_total_is_not_a_case(tmp_path):
+    estimate = {"mode": "gut", "total": None}
+    with pytest.raises(ValueError, match="states no total"):
+        eval_case("SHOP-1", estimate, None, actual(2.0, [], "worklog"), None)
+    case = {"estimate": estimate, "actual": {"total": 1.0}, "check_errors": ["mode"]}
+    (tmp_path / "SHOP-1.json").write_text(json.dumps(case))
+    with pytest.raises(ValueError, match="states no total"):
+        load_cases(tmp_path)
 
 
 def test_part_pairs_count_a_missing_kind_in_the_estimate_as_zero():

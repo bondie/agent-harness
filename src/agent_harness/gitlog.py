@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .artifacts import Json, first_key
+from .artifacts import Json, ticket_keys
 
 DEFAULT_TEST_PATTERNS = ("tests/", "spec/", "*Test.php", "*_test.py", "*.spec.ts")
 RECORD = "\x1e"
@@ -60,32 +60,46 @@ def mentions(message: str, term: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", message) is not None
 
 
-def changes(repo: Path, term: str) -> list[FileChange]:
-    """File changes of the commits on any ref whose message names `term`.
-
-    A commit that is on two branches under different hashes (a cherry-pick, a rebased branch
-    still pushed) has the same message and the same changes; it counts once.
-    """
-    output = git(
+def _log(repo: Path, rev: str | None, term: str | None) -> str:
+    grep = ["--fixed-strings", f"--grep={term}"] if term else []
+    return git(
         repo,
         "log",
-        "--all",
-        "--fixed-strings",
-        f"--grep={term}",
+        rev or "--all",
+        *grep,
         "--numstat",
-        f"--format={RECORD}%H%x00%B%x00",
+        f"--format={RECORD}%H%x00%at%x00%B%x00",
     )
-    seen: set[tuple[str, tuple[str, ...]]] = set()
-    found: list[FileChange] = []
+
+
+def _by_term(output: str, terms: Sequence[str]) -> dict[str, list[FileChange]]:
+    """A commit on two branches under different hashes (a cherry-pick, a rebased branch still
+    pushed) keeps its author time, message and changes; it counts once."""
+    seen: dict[str, set[tuple[str, str, tuple[str, ...]]]] = {term: set() for term in terms}
+    found: dict[str, list[FileChange]] = {term: [] for term in terms}
     for record in output.split(RECORD)[1:]:
-        _, message, numstat = record.split("\x00", 2)
+        _, authored, message, numstat = record.split("\x00", 3)
         lines = tuple(line for line in numstat.splitlines() if line.count("\t") >= 2)
-        signature = (message.strip(), lines)
-        if not mentions(message, term) or signature in seen:
-            continue
-        seen.add(signature)
-        found += [_change(line) for line in lines]
+        signature = (authored, message.strip(), lines)
+        for term in terms:
+            if term not in message or not mentions(message, term) or signature in seen[term]:
+                continue
+            seen[term].add(signature)
+            found[term] += [_change(line) for line in lines]
     return found
+
+
+def changes(repo: Path, term: str, rev: str | None = None) -> list[FileChange]:
+    """File changes of the commits whose message names `term`, on `rev` or on any ref."""
+    return _by_term(_log(repo, rev, term), [term])[term]
+
+
+def changes_by_term(
+    repo: Path, terms: Sequence[str], rev: str | None = None
+) -> dict[str, list[FileChange]]:
+    """`changes` for many terms from one pass over the log."""
+    unique = list(dict.fromkeys(terms))
+    return _by_term(_log(repo, rev, None), unique) if unique else {}
 
 
 def _change(line: str) -> FileChange:
@@ -140,28 +154,31 @@ def resolve(repo: Path, commit: str) -> str:
 
 @dataclass(frozen=True)
 class Attribution:
-    ticket: str
+    candidates: tuple[str, ...]
     found_in: str
 
 
 def ticket_of(repo: Path, commit: str) -> Attribution | None:
-    """The ticket key of a commit: from its message, else from the first merge that brought it
-    in (a merge request's merge commit carries the branch name and the title)."""
-    key = first_key(git(repo, "log", "-1", "--format=%B", commit))
-    if key:
-        return Attribution(key, "the commit message")
+    """The ticket keys of a commit: from its message, else from the first merge that brought
+    its branch in (a merge request's merge commit carries the branch name and the title).
+
+    A merge brought the commit in only when the commit is on its second parent's side and
+    not on its first: a commit made on the target branch belongs to no later merge.
+    """
+    commit = resolve(repo, commit)
+    keys = ticket_keys(git(repo, "log", "-1", "--format=%B", commit))
+    if keys:
+        return Attribution(tuple(keys), "the commit message")
+    path = ["log", "--all", f"^{commit}", "--ancestry-path"]
+    descendants = {commit, *git(repo, *path, "--format=%H").split()}
     merges = git(
-        repo,
-        "log",
-        "--all",
-        f"^{commit}",
-        "--ancestry-path",
-        "--merges",
-        "--topo-order",
-        "--reverse",
-        f"--format={RECORD}%B",
+        repo, *path, "--merges", "--topo-order", "--reverse", f"--format={RECORD}%P%x00%B"
     ).split(RECORD)[1:]
-    key = first_key(merges[0]) if merges else None
-    if key:
-        return Attribution(key, "the merge commit")
+    for merge in merges:
+        parents, message = merge.split("\x00", 1)
+        first, second = parents.split()[:2]
+        if second not in descendants or first in descendants:
+            continue
+        keys = ticket_keys(message)
+        return Attribution(tuple(keys), "the merge commit") if keys else None
     return None

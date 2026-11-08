@@ -17,6 +17,7 @@ from agent_harness.artifacts import (
     ticket_dir,
     ticket_dirs,
 )
+from agent_harness.gitlog import changes, diff
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 
@@ -68,7 +69,9 @@ def test_harness_home_defaults_to_the_run_log_directory(monkeypatch):
     assert harness_home() == Path.home() / ".claude" / "agent-harness"
 
 
-@pytest.mark.parametrize("key", ["../etc", "a/b", "", ".hidden", "SHOP-1/.."])
+@pytest.mark.parametrize(
+    "key", ["../etc", "a/b", "", ".hidden", "SHOP-1/..", "UTF-8", "PSR-12", "SHA-256", "utf-8"]
+)
 def test_ticket_dir_rejects_unsafe_keys(key, tmp_path):
     with pytest.raises(ValueError, match="Not a ticket key"):
         ticket_dir(key, tmp_path)
@@ -184,6 +187,35 @@ def test_review_finding_records_the_disposition(home, capsys):
     assert findings[0]["note"] == "not a bug"
 
 
+def test_review_finding_in_the_rounds_of_a_review(home, capsys):
+    ticket = home / "tickets" / "SHOP-412"
+    first = {**REVIEW, "verdict": "changes"}
+    (ticket / "review.01.json").write_text(json.dumps(first))
+    later = {**REVIEW, "findings": [*REVIEW["findings"], {"id": "F3", "severity": "minor"}]}
+    (ticket / "review.json").write_text(json.dumps(later))
+
+    assert cli.main(["review-finding", "SHOP-412", "F3", "--disposition", "deferred"]) == 0
+    assert read(ticket / "review.json")["findings"][2]["disposition"] == "deferred"
+    capsys.readouterr()
+
+    assert cli.main(["review-finding", "SHOP-412", "F1", "--disposition", "accepted"]) == 1
+    assert "Rounds 1, 2 all have F1; give --round N" in capsys.readouterr().err
+    arguments = ["review-finding", "SHOP-412", "F1", "--disposition", "accepted", "--round", "1"]
+    assert cli.main(arguments) == 0
+    assert read(ticket / "review.01.json")["findings"][0]["disposition"] == "accepted"
+    assert read(ticket / "review.json")["findings"][0]["disposition"] is None
+    assert cli.main([*arguments[:-1], "3"]) == 1
+    assert "No review round 3" in capsys.readouterr().err
+
+    assert cli.main(["metrics", "--json"]) == 0
+    reviewer = json.loads(capsys.readouterr().out)["reviewer"]
+    assert reviewer["tickets"][0]["rounds"] == 2
+    assert reviewer["tickets"][0]["verdict"] == "pass"
+    assert reviewer["by_severity"]["all"]["findings"] == 5
+    assert reviewer["by_severity"]["all"]["by_disposition"]["accepted"] == 1
+    assert reviewer["by_severity"]["all"]["by_disposition"]["deferred"] == 1
+
+
 def test_review_finding_errors(home, capsys):
     assert cli.main(["review-finding", "SHOP-412", "F9", "--disposition", "accepted"]) == 1
     error = capsys.readouterr().err
@@ -248,6 +280,80 @@ def test_escaped_needs_a_ticket(home, git_repo, capsys):
     assert "SHOP-412 (from --ticket)" in capsys.readouterr().out
     entry = read(home / "tickets" / "SHOP-412" / "escaped.json")[0]
     assert (entry["source"], entry["ref"], entry["summary"]) == ("manual", None, "")
+
+
+def test_escaped_skips_the_names_of_standards(home, git_repo, capsys):
+    sha = git_repo.commit("fix: read the feed as UTF-8 per PSR-12 - SHOP-412", {"a": "a"})
+    assert cli.main(["escaped", "--commit", sha, "--repo", str(git_repo.path)]) == 0
+    assert "SHOP-412 (from the commit message)" in capsys.readouterr().out
+
+
+def test_escaped_prefers_the_key_with_a_ticket_directory(home, git_repo, capsys):
+    sha = git_repo.commit("fix: SHOP-7 regression, see SHOP-412", {"a": "a"})
+    assert cli.main(["escaped", "--commit", sha, "--repo", str(git_repo.path)]) == 0
+    assert "SHOP-412 (from the commit message)" in capsys.readouterr().out
+
+    other = git_repo.commit("fix: SHOP-8 and SHOP-9 together", {"b": "b"})
+    assert cli.main(["escaped", "--commit", other, "--repo", str(git_repo.path)]) == 1
+    assert "SHOP-8, SHOP-9; give --ticket KEY" in capsys.readouterr().err
+    (home / "tickets" / "SHOP-8").mkdir()
+    (home / "tickets" / "SHOP-9").mkdir()
+    assert cli.main(["escaped", "--commit", other, "--repo", str(git_repo.path)]) == 1
+    assert "SHOP-8, SHOP-9; give --ticket KEY" in capsys.readouterr().err
+
+
+def test_metrics_reads_each_repository_once_with_the_same_files(home, git_repo, tmp_path):
+    second = type(git_repo)(tmp_path / "second")
+    for index, key in enumerate(["SHOP-1", "SHOP-12", "SHOP-412", "SHOP-1", "PROJ-7"]):
+        git_repo.commit(f"change {key}", {f"src/{index}.php": "x"})
+        second.commit(f"other {key} SHOP-412", {f"lib/{index}.ts": "y"})
+    keys = ["SHOP-1", "SHOP-12", "SHOP-412", "PROJ-7", "SHOP-5"]
+    repos = [git_repo.path, second.path]
+
+    per_key = {
+        key: list(diff([c for repo in repos for c in changes(repo, key)]).files) for key in keys
+    }
+    assert cli.files_by_key(repos, keys, None) == per_key
+    assert per_key["SHOP-5"] == []
+
+
+def test_export_case_keeps_an_estimate_the_check_rejected(home, capsys):
+    rejected = {
+        **ESTIMATE,
+        "adjustments": [{"hours": 1.0, "reason": "gut feeling", "citation": ""}],
+        "total": 3.0,
+    }
+    (home / "tickets" / "SHOP-412" / "estimate.json").write_text(json.dumps(rejected))
+    arguments = ["export-case", "SHOP-412", "--source", "worklog", "--actual-total", "2"]
+
+    assert cli.main(arguments) == 0
+    assert "estimate 3 h (stated total, the estimate check failed)" in capsys.readouterr().out
+    case = read(home / "eval-cases" / "SHOP-412.json")
+    assert "citation" in case["check_errors"][0]
+
+    assert cli.main(["eval"]) == 0
+    text = capsys.readouterr().out
+    assert "| all | 0 | - |" in text
+    assert "| kept after the check failed | 1 | 1.00 | 1.00 | +1.00 | 1 | 0 |" in text
+    assert "1 cases, 1 of them kept after the estimate check failed" in text
+
+
+def test_export_case_on_one_branch(home, git_repo, capsys):
+    git_repo.commit("init", {"src/Price.php": "a\n"})
+    git_repo.git("checkout", "-q", "-b", "feature/SHOP-412")
+    git_repo.commit("wip SHOP-412", {"src/Price.php": "a\nb\n", "src/Old.php": "o\n"})
+    git_repo.git("checkout", "-q", "main")
+    git_repo.commit("feat: round prices SHOP-412", {"src/Price.php": "a\nb\n"})
+    arguments = ["export-case", "SHOP-412", "--source", "worklog", "--actual-total", "2"]
+    arguments += ["--repo", str(git_repo.path)]
+
+    assert cli.main([*arguments, "--rev", "main"]) == 0
+    assert read(home / "eval-cases" / "SHOP-412.json")["diff"]["files"] == ["src/Price.php"]
+    assert cli.main(arguments) == 0
+    assert read(home / "eval-cases" / "SHOP-412.json")["diff"]["files"] == [
+        "src/Old.php",
+        "src/Price.php",
+    ]
 
 
 def test_escaped_then_metrics(home, git_repo, capsys):

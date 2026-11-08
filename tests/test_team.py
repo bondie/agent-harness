@@ -107,8 +107,12 @@ def test_plan_totals_without_tickets():
 def random_findings(rng, count):
     severities = [*SEVERITIES, "trivial"]
     return [
-        {"severity": pick(rng, severities), "disposition": pick(rng, DISPOSITION_VALUES)}
-        for _ in range(count)
+        {
+            "id": f"F{number}",
+            "severity": pick(rng, severities),
+            "disposition": pick(rng, DISPOSITION_VALUES),
+        }
+        for number in range(1, count + 1)
     ]
 
 
@@ -133,14 +137,22 @@ def write(path, data):
 def test_finding_counts_and_acceptance_rate_by_severity(tmp_path, seed):
     rng = np.random.default_rng(seed)
     tickets = []
+    rounds = {}
     for i in range(int(rng.integers(1, 7))):
-        findings = random_findings(rng, int(rng.integers(0, 9)))
         directory = tmp_path / f"SHOP-{i}"
-        write(directory / "review.json", {"ticket": directory.name, "findings": findings})
-        tickets.append(findings)
+        rounds[directory.name] = int(rng.integers(1, 4))
+        for number in range(1, rounds[directory.name] + 1):
+            findings = random_findings(rng, int(rng.integers(0, 9)))
+            name = (
+                "review.json" if number == rounds[directory.name] else f"review.{number:02d}.json"
+            )
+            write(directory / name, {"ticket": directory.name, "findings": findings})
+            tickets.append(findings)
 
-    rows = by_severity(collect(sorted(tmp_path.iterdir())).reviews)
+    reviews = collect(sorted(tmp_path.iterdir())).reviews
+    rows = by_severity(reviews)
 
+    assert {check.ticket: check.rounds for check in reviews} == rounds
     everything = [finding for findings in tickets for finding in findings]
     for name in SEVERITIES:
         subset = [f for f in everything if f["severity"] == name]

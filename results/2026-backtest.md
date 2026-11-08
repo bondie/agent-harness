@@ -334,6 +334,24 @@ both are rounded to half an hour, as the prompt asks. The gemma4:12b variants we
 this time, as a local run takes about two hours per variant; they can be added with the same
 command.
 
+**Caveat: the model chose the median it started from.** In these runs the block's
+`reference_median` was whatever the model wrote, and code added the adjustments to that
+number. At least 22 of the 150 structured estimates (24 of 150 with memory) moved off the
+retrieved median without any cited adjustment: they cite nothing, yet their total differs from
+the retrieved median rounded to half an hour. Estimates that cite an adjustment may have
+moved the starting point too; the run files keep the computed total but not the block, so
+this section cannot be recomputed from them. The published MAE of the structured variants
+therefore uses the model's median, not the retrieved one. The evaluation now computes the
+reference-mode total from the retrieved median plus the cited adjustments, records the
+block's mode and median, and reports the share of blocks whose median differs from the
+retrieved one ("median drift"); a rerun with it is pending.
+
+The runs used `agents/estimator.md` as it stood before the paragraph on dated memory lessons
+was merged into it, and before it required `reference_median` to be exactly the retrieved
+median. The recent median scores 1.33 h here and 1.34 h in section 3: the ticket-precedent
+index was refreshed between the two runs, and one ticket's reference class came out different
+(its recent median 2.25 h instead of 1.88 h, against 13 h logged).
+
 | Variant (150 tickets) | MAE h [95% CI] | vs recent median p | At the reference median | Rejected by the check | Cost USD |
 |---|---:|---:|---:|---:|---:|
 | Median of 10 similar recent tickets | 1.33 [1.06-1.68] | - | - | - | 0.00 |
@@ -343,8 +361,10 @@ command.
 
 What the numbers say:
 
-- **Computing the number in code did not change accuracy.** MAE 1.37 h against 1.34 h for
-  the earlier format (paired Wilcoxon p = 0.51, Â12 0.48); both tie the plain recent median.
+- **Computing the number in code made no measurable difference to accuracy.** MAE 1.37 h
+  against 1.34 h for the earlier format (paired Wilcoxon p = 0.51, Â12 0.48) and 1.33 h for
+  the plain recent median (p = 0.30). It did change behaviour: more estimates kept the median
+  (below).
 - **More estimates keep the median, most still move.** The share at the median rose from
   30% to 41%. The rest moved mostly up (61 up, 28 down; earlier format 64 up, 41 down), on
   average +0.33 h against +0.29 h.
@@ -443,8 +463,9 @@ Total cost: 7.05 USD for 450 estimates.
 _Fewer than two tickets: nothing to compare._
 
 ## 4. Run notes
-- llm-hybrid-recent-structured@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 6.1 s per ticket; 41% of 150 estimates at the reference median (both rounded to 0.5 h); 0 rejected by the estimate check, 0 of them for an uncited adjustment
-- llm-hybrid-recent-structured+memory@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 6.1 s per ticket; 41% of 150 estimates at the reference median (both rounded to 0.5 h); 0 rejected by the estimate check, 0 of them for an uncited adjustment; memory: 0.0 lessons per ticket (at most 0) of 0 dated, 45 without a date left out
+- llm-hybrid-recent-structured@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 6.1 s per ticket; 41% of 150 estimates at the reference median (both rounded to 0.5 h); 0 rejected by the estimate check, 0 of them for an uncited adjustment; 0 retried after the check, 0 kept after the check failed (stated total)
+- llm-hybrid-recent-structured+memory@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 6.1 s per ticket; 41% of 150 estimates at the reference median (both rounded to 0.5 h); 0 rejected by the estimate check, 0 of them for an uncited adjustment; 0 retried after the check, 0 kept after the check failed (stated total); memory: 0.0 lessons per ticket (at most 0) of 0 dated, 45 without a date left out
 - llm-hybrid-recent@claude-sonnet: 150 tickets, 0 without an estimate, 16 with estimates masked in the text, 5.2 s per ticket; 30% of 150 estimates at the reference median (both rounded to 0.5 h)
 - recent-median: 150 tickets, 0 without an estimate, 0 with estimates masked in the text, 0.5 s per ticket
 - Compared on 150 tickets estimated by every variant.
+- Partial gemma4:12b runs of these variants (stopped early) sit in the run directory's `partial-gemma/` subfolder, so `harness-eval report` on the directory reproduces the 150 tickets above.

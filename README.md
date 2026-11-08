@@ -20,12 +20,16 @@ mode against simpler baselines, a local model and human estimates on real, priva
 history; only aggregate numbers are published.
 
 **Backtest on 1,212 finished tickets from 2026** (private history, logged hours as ground
-truth, no future data in reach): the estimator with a recent reference class is as accurate
-as the plain median of similar recent tickets (MAE 1.36 h vs 1.34 h, p = 0.78) and its
-P25–P75 range holds the actual time 52% of the time. Without similar tickets, Claude Sonnet is
-worse than random guessing and a local 12B model is far worse; with them, the local model
-matches Claude. The biggest gain came from neither model: limiting the reference class to
-tickets after a process change cut the error by 29%. [Details](#does-it-work).
+truth, no future data in reach): the estimator 0.6 ships, which returns a structured block
+and lets code compute the number, shows no measurable difference from the plain median of
+similar recent tickets (MAE 1.37 h vs 1.33 h, p = 0.30, Claude Sonnet on a 150-ticket
+sample). It gives one number, so its range was not measured; in that run the model also chose
+the median it started from, which 0.6 no longer allows (a rerun is pending, see
+[Does it work?](#does-it-work)). The earlier answer format tied the median the same way (1.36 h
+vs 1.34 h, p = 0.78) and its P25–P75 range held the actual time 52% of the time. Without
+similar tickets, Claude Sonnet is worse than random guessing and a local 12B model is far
+worse; with them, the local model matches Claude. The biggest gain came from neither model:
+limiting the reference class to tickets after a process change cut the error by 29%.
 
 ## What is inside
 
@@ -45,7 +49,7 @@ its own marketplace.
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
 | `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
-| `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/`. |
+| `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/` (under `$HARNESS_HOME` when set). |
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database ([rules](#shell-guard)). |
@@ -270,7 +274,8 @@ With `"require_source": false` a date alone, `(YYYY-MM-DD)`, is enough.
 { "max_file_kb": 8, "max_index_kb": 4, "require_source": true }
 ```
 
-**The lint**, from a checkout of this repository:
+**The lint**, from a checkout of this repository (or with `uvx`, as in
+[Measuring the team](#measuring-the-team-not-just-the-estimator)):
 
 ```bash
 uv run harness-eval memory lint [--dir ~/.claude/agent-memory]
@@ -408,13 +413,21 @@ What the numbers say:
   guessing; the 12B model overestimated by three hours at the median.
 - **A local model is enough.** With the same reference class, gemma4:12b on a laptop matched
   Claude Sonnet (1.37 h vs 1.36 h) at no cost; Claude cost about 0.018 USD per estimate.
-- **The prompt's anchoring rule is not followed, and enforcing it in code did not help.** It
-  says to keep the median unless a difference can be named, yet both models moved away from
-  it on 93–95% of tickets (71% once both are rounded to half an hour) and ended up
-  overestimating slightly more than the median itself (+0.25 to +0.50 h vs +0.31 h). With
-  the number computed by code from the median and cited adjustments, Claude kept the median
-  on 41% of tickets instead of 30%, cited a neighbour for every move, and was exactly as
-  accurate (MAE 1.37 h vs 1.34 h, p = 0.51).
+- **The prompt's anchoring rule is not followed; enforcing it in code changed behaviour, not
+  accuracy.** The rule says to keep the median unless a difference can be named, yet both
+  models moved away from it on 93–95% of tickets (71% once both are rounded to half an hour)
+  and ended up overestimating slightly more than the median itself (+0.25 to +0.50 h vs
+  +0.31 h). With the number computed by code from the median and cited adjustments, Claude
+  kept the median on 41% of tickets instead of 30% and cited a neighbour for every
+  adjustment, with no measurable difference in accuracy (MAE 1.37 h vs 1.34 h for the
+  earlier format, p = 0.51; 1.33 h for the recent median, p = 0.30). Caveat: in that run
+  the model wrote the median itself, and at least 22 of 150 estimates moved off the
+  retrieved median without a cited adjustment. The published MAE uses the model's median;
+  the evaluation now starts from the retrieved one and reports this "median drift", and a
+  rerun is pending. That run also predates the memory paragraph in `agents/estimator.md`.
+  The recent median scores 1.33 h there and 1.34 h above because the ticket index was
+  refreshed between the runs and one ticket's reference class changed
+  ([section 4](results/2026-backtest.md)).
 - **Keyword and hybrid retrieval tie here** (1.58 h vs 1.60 h for Claude). The tickets of one
   team share vocabulary, so BM25 finds the same neighbours.
 
@@ -433,14 +446,17 @@ be told.
 
 The backtest covers only the reference class mode, because old tickets have no plans. The
 bottom-up mode, the analyst and the reviewer are measured going forward instead, from what the
-plugin keeps for each ticket in `~/.claude/agent-harness/tickets/<KEY>/` (`HARNESS_HOME`
-moves the root): the analysis, the estimate and the review the agents returned, and what the
-retro adds to them. Run the commands from a checkout of this repository.
+plugin keeps for each ticket in `~/.claude/agent-harness/tickets/<KEY>/` (under
+`$HARNESS_HOME` when set): the analysis, the estimate and the review the agents returned, and
+what the retro adds to them. A plugin install does not put `harness-eval` on PATH: run it as
+`uvx --from git+https://github.com/bondie/agent-harness harness-eval …`, or as
+`uv run --project <an agent-harness checkout> harness-eval …` (`uv run harness-eval …` inside
+the checkout, as below).
 
 ```bash
 # After the work is logged: freeze the ticket as an eval case with the time it took
-uv run harness-eval export-case SHOP-412 --source measured \
-    --actual-part implementation=1.5 verification=0.5 release=0.25 --repo ../shop ../platform
+uv run harness-eval export-case SHOP-412 --source worklog --actual-total 2.5 \
+    --repo ../shop ../platform --rev main
 uv run harness-eval eval                       # errors over all exported cases
 
 # In the retro: what the person did with each review finding
@@ -459,29 +475,42 @@ uv run harness-eval metrics --repo ../shop ../platform          # or --json
   analysis as the agents returned them, and the actual time. Give it per part kind
   (`--actual-part`, kinds `implementation`, `verification` and `release`), as a total
   (`--actual-total`, by default the sum of the parts) or both, and say where it comes from
-  (`--source measured|worklog`). With `--repo`, it also records the diff of the commits on any
-  branch whose message names the key (`--grep` for another term): the files, the lines added
-  and removed, and how many added lines are tests (`--test-pattern`, by default `tests/`,
-  `spec/`, `*Test.php`, `*_test.py` and `*.spec.ts`). It also writes `outcome.json` into the
-  ticket directory.
+  (`--source measured|worklog`). Take the total from the worklogs and give a part only when
+  it was measured; do not split a logged total by guess. With `--repo`, it also records the
+  diff of the commits whose message names the key (`--grep` for another term) on any branch,
+  or only on `--rev REV` (for example the target branch, when a squashed branch still lingers):
+  the files, the lines added and removed, and how many added lines are tests
+  (`--test-pattern`, by default `tests/`, `spec/`, `*Test.php`, `*_test.py` and `*.spec.ts`).
+  A commit on two branches (a cherry-pick) counts once; two commits with the same message and
+  changes but different author times count twice. An estimate the hook let through after its
+  retries although the check still rejected it is exported with its stated total and the
+  check's errors (`check_errors`). It also writes `outcome.json` into the ticket directory.
 - **`eval [DIR]`** reports, for the total by estimate mode and for each part kind, the mean
   and the median absolute error in hours and the bias: estimate minus actual, so a positive
   bias means the estimates were too high. The total is computed from the parts (or the
-  reference median) plus the adjustments, not taken from the model. The report has no ticket
-  keys, so it can be published like [`results/`](results/).
+  reference median) plus the adjustments, not taken from the model; cases kept after the
+  check failed are counted and shown in their own row, with their stated total. The report
+  has no ticket keys, so it can be published like [`results/`](results/).
 - **`metrics`** measures the analyst by the files of its plan against the files that changed:
   precision is the share of planned files that changed, recall the share of changed files the
   plan named. The changed files come from the commits that name the key in the `--repo`
-  repositories, else from the exported case, else from the files the implementer reported. It
-  measures the reviewer by its findings per severity and disposition, the acceptance rate
+  repositories (one `git log` per repository, `--rev` as for `export-case`), else from the
+  exported case, else from the files the implementer reported. It measures the reviewer by
+  the findings of every review round per severity and disposition, the acceptance rate
   (accepted / (accepted + rejected)), and the defects that reached production. A ticket with
   a review and an escaped defect is marked *reviewer passed, defect escaped*. The rows name
   ticket keys: keep this output private.
-- **`review-finding KEY F1 … --disposition accepted|rejected|deferred`** records in
-  `review.json` what the person did with a finding, with an optional `--note`.
+- **`review-finding KEY F1 … --disposition accepted|rejected|deferred`** records what the
+  person did with a finding, with an optional `--note`. Each review round has its own block:
+  `review.json` is the last, `review.01.json`, `review.02.json`, … the earlier ones. Ids are
+  matched within one round; give `--round N` (1 first) when the id is in several.
 - **`escaped --commit SHA --repo PATH`** finds the ticket key in the commit message, else in
   the first merge commit that brought the commit in (a merge request's merge commit carries
-  its branch name and title); `--ticket KEY` when neither names one. It appends the defect to
+  its branch name and title): a merge whose second parent has the commit and whose first
+  parent does not, so a commit made on the target branch is never blamed on a later merge.
+  Names of standards (`UTF-8`, `PSR-12`, `SHA-256`, …) are not keys. Of several keys it takes
+  the one that already has a ticket directory; when that leaves more than one, or none names
+  a ticket, it lists them and asks for `--ticket KEY`. It appends the defect to
   the ticket's `escaped.json`, once per commit and reference. `--case` takes an
   [incident-scout](https://github.com/bondie/incident-scout) case file (`scout export-case`):
   its id becomes the reference and its reviewed cause the summary. A case names no commit or
@@ -552,8 +581,9 @@ uv run harness-eval metrics --repo ../shop ../platform          # or --json
   has a `verification-before-completion` skill and tests skills by running subagents on
   pressure scenarios with and without them. HumanLayer's research → plan → implement
   ([advanced context engineering](https://github.com/humanlayer/advanced-context-engineering-for-coding-agents))
-  writes an artifact per phase and clears the context between phases, as the ticket artifacts
-  here carry the analysis and the estimate to the next agent. Sharing memory across a team is
+  writes an artifact per phase and clears the context between phases. Here the lead passes
+  the analysis to the next agent in its prompt; the ticket artifacts serve the retro and the
+  evals, not the hand-over. Sharing memory across a team is
   discussed in [docs/shared-memory.md](docs/shared-memory.md).
 
 What this repository adds: hours from private worklogs (no training-data contamination),

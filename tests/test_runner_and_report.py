@@ -187,6 +187,10 @@ class Rejecting:
             lessons=1 if target.key == "SHOP-4" else 0,
             lessons_dated=3,
             lessons_undated=40,
+            block_mode="reference" if target.key != "SHOP-3" else "bottom-up",
+            block_reference_median=2.0 if target.key == "SHOP-2" else 1.0,
+            retried=target.key in ("SHOP-1", "SHOP-2"),
+            check_errors=("adjustments[0] has no citation",) if target.key == "SHOP-1" else (),
         )
 
 
@@ -199,6 +203,8 @@ def test_a_rejected_estimate_is_a_failure_that_keeps_its_cost(tmp_path, targets)
     assert records["acme-jira/SHOP-5"].cost_usd == 0.02
     assert records["acme-jira/SHOP-4"].reference_median == 1.0
     assert records["acme-jira/SHOP-4"].lessons == 1
+    assert records["acme-jira/SHOP-1"].check_errors == ("adjustments[0] has no citation",)
+    assert records["acme-jira/SHOP-2"].block_reference_median == 2.0
 
 
 def test_run_notes_show_anchoring_rejections_and_memory(tmp_path, targets):
@@ -209,6 +215,11 @@ def test_run_notes_show_anchoring_rejections_and_memory(tmp_path, targets):
     structured = next(line for line in notes.splitlines() if Rejecting.name in line)
     assert "; 20% of 5 estimates at the reference median" in structured
     assert "; 2 rejected by the estimate check, 1 of them for an uncited adjustment" in structured
+    assert "; 2 retried after the check, 1 kept after the check failed (stated total)" in structured
+    assert (
+        "; median drift: 1 of 4 reference-mode blocks (25%) wrote a median other than the "
+        "retrieved one" in structured
+    )
     assert (
         "; memory: 0.2 lessons per ticket (at most 1) of 3 dated, 40 without a date left out"
         in structured

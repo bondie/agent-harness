@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .artifacts import Json, read_json
-from .estimate_check import validate_and_total
+from .estimate_check import number, validate_and_total
 from .metrics import Prediction, absolute_errors
 
 PART_KINDS = ("implementation", "verification", "release")
@@ -69,17 +69,46 @@ def actual(total: float | None, parts: Sequence[tuple[str, float]], source: str)
     }
 
 
+def stated_total(estimate: Json) -> float | None:
+    total = number(estimate.get("total"))
+    return total if total is not None and total >= 0 else None
+
+
 def eval_case(
     key: str, estimate: Json, analysis: Json | None, actual: Json, diff: Json | None
 ) -> Json:
-    estimate_total(estimate)
-    return {
+    """The case of a finished ticket. An estimate the check still rejected when the hook let it
+    through after its retries keeps its stated total and the check's errors."""
+    case = {
         "ticket": key,
         "estimate": estimate,
         "analysis": analysis,
         "actual": actual,
         "diff": diff,
     }
+    total, problems = validate_and_total(estimate)
+    if total is not None:
+        return case
+    if stated_total(estimate) is None:
+        raise ValueError(
+            "The estimate does not pass the harness-estimate check and states no total: "
+            + " ".join(problems)
+        )
+    return {**case, "check_errors": problems}
+
+
+def check_failed(case: Json) -> bool:
+    return bool(case.get("check_errors"))
+
+
+def case_total(case: Json) -> float:
+    """The code's total, or the stated one of an estimate kept after the check failed."""
+    if not check_failed(case):
+        return estimate_total(case["estimate"])
+    total = stated_total(case["estimate"])
+    if total is None:
+        raise ValueError(f"The estimate of {case.get('ticket')} states no total")
+    return total
 
 
 def load_cases(directory: Path) -> list[Json]:
@@ -92,6 +121,8 @@ def load_cases(directory: Path) -> list[Json]:
             case["actual"].get("total"), int | float
         ):
             raise ValueError(f"{path} is not an eval case: it has no actual total")
+        if check_failed(case) and stated_total(case["estimate"]) is None:
+            raise ValueError(f"{path} is not an eval case: its failed estimate states no total")
         cases.append(case)
     if not cases:
         raise ValueError(f"No eval cases in {directory}")
@@ -129,7 +160,7 @@ def errors(pairs: Sequence[Pair]) -> Errors | None:
 
 
 def total_pairs(cases: Iterable[Json]) -> list[Pair]:
-    return [(estimate_total(case["estimate"]), float(case["actual"]["total"])) for case in cases]
+    return [(case_total(case), float(case["actual"]["total"])) for case in cases]
 
 
 def part_pairs(cases: Iterable[Json], kind: str) -> list[Pair]:
@@ -155,15 +186,19 @@ def by_mode(cases: Iterable[Json]) -> dict[str, list[Json]]:
     return grouped
 
 
+KEPT = "kept after the check failed"
 HEADER = (
     "| {label} | n | MAE h | MdAE h | Bias h | Over | Under |\n|---|---:|---:|---:|---:|---:|---:|"
 )
 
 
 def report(cases: Sequence[Json]) -> str:
-    totals = {"all": errors(total_pairs(cases))}
-    totals |= {mode: errors(total_pairs(group)) for mode, group in by_mode(cases).items()}
-    parts = {kind: errors(part_pairs(cases, kind)) for kind in PART_KINDS}
+    checked = [case for case in cases if not check_failed(case)]
+    failed = [case for case in cases if check_failed(case)]
+    totals = {"all": errors(total_pairs(checked))}
+    totals |= {mode: errors(total_pairs(group)) for mode, group in by_mode(checked).items()}
+    totals[KEPT] = errors(total_pairs(failed))
+    parts = {kind: errors(part_pairs(checked, kind)) for kind in PART_KINDS}
     sources = sorted({str(case["actual"].get("source")) for case in cases})
     sections = [
         "## Total, by estimate mode",
@@ -173,7 +208,8 @@ def report(cases: Sequence[Json]) -> str:
         "adjustments have no kind and are left out.",
         _table("Part", parts),
         f"Bias is estimate minus actual: positive means too high. {len(cases)} cases, "
-        f"actual time from: {', '.join(sources)}.",
+        f"{len(failed)} of them kept after the estimate check failed (their stated total, in "
+        f"the row {KEPT!r} only), actual time from: {', '.join(sources)}.",
     ]
     return "\n\n".join(sections) + "\n"
 

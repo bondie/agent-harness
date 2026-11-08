@@ -18,7 +18,7 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,8 +78,9 @@ class Memory:
         return len(self.lessons) - self.dated
 
     def usable_on(self, created: str) -> list[Lesson]:
-        """The lessons a ticket created at `created` (ISO date or timestamp) may see."""
-        day = date.fromisoformat(created[:10])
+        """The lessons a ticket created at `created` (ISO date or timestamp) may see, by the
+        local day, the day the lessons are dated in."""
+        day = datetime.fromisoformat(created).astimezone().date()
         return [lesson for lesson in self.lessons if lesson.usable_on(day)]
 
 

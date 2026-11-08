@@ -15,6 +15,21 @@ import yaml
 Json = dict[str, Any]
 
 TICKET = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+NOT_TICKET_PREFIXES = (
+    "UTF",
+    "ISO",
+    "PSR",
+    "SHA",
+    "RFC",
+    "CVE",
+    "HTTP",
+    "TLS",
+    "X",
+    "ECMA",
+    "IEEE",
+    "UTC",
+    "GMT",
+)
 SAFE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 BLOCK = re.compile(
     r"^[ \t]*```json[ \t]+harness-(?P<kind>[a-z][a-z0-9-]*)[ \t]*\r?\n"
@@ -32,7 +47,7 @@ def harness_home() -> Path:
 
 
 def ticket_dir(key: str, home: Path | None = None) -> Path:
-    if not SAFE_KEY.fullmatch(key) or ".." in key:
+    if not SAFE_KEY.fullmatch(key) or ".." in key or is_standard_name(key):
         raise ValueError(f"Not a ticket key: {key!r}")
     return (home or harness_home()) / "tickets" / key
 
@@ -44,9 +59,44 @@ def ticket_dirs(home: Path | None = None) -> list[Path]:
     return sorted(path for path in root.iterdir() if path.is_dir())
 
 
-def first_key(text: str) -> str | None:
-    match = TICKET.search(text)
-    return match.group() if match else None
+def is_standard_name(key: str) -> bool:
+    """Key-shaped names of standards and encodings: UTF-8, PSR-12, SHA-256."""
+    prefix, separator, number = key.rpartition("-")
+    return bool(separator) and number.isdigit() and prefix.upper() in NOT_TICKET_PREFIXES
+
+
+def ticket_keys(text: str) -> list[str]:
+    """The ticket keys in `text`, first mention first, without the names of standards."""
+    found = (match.group() for match in TICKET.finditer(text))
+    return list(dict.fromkeys(key for key in found if not is_standard_name(key)))
+
+
+def pick_ticket(candidates: Sequence[str], home: Path | None = None) -> str:
+    """The one candidate key, else the one that already has a ticket directory."""
+    if len(candidates) == 1:
+        return candidates[0]
+    known = [key for key in candidates if ticket_dir(key, home).is_dir()]
+    if len(known) == 1:
+        return known[0]
+    raise ValueError(
+        f"Several ticket keys could be meant: {', '.join(known or candidates)}; give --ticket KEY"
+    )
+
+
+ROUND = re.compile(r"review\.(\d+)\.json")
+
+
+def review_rounds(directory: Path) -> list[Path]:
+    """The review blocks of a ticket, round 1 first: `review.<NN>.json` keeps the earlier rounds
+    and `review.json` the latest."""
+    numbered = [
+        (int(match[1]), path)
+        for path in directory.glob("review.*.json")
+        if (match := ROUND.fullmatch(path.name))
+    ]
+    rounds = [path for _, path in sorted(numbered)]
+    latest = directory / "review.json"
+    return [*rounds, latest] if latest.is_file() else rounds
 
 
 def read_json(path: Path) -> Any:
@@ -93,21 +143,44 @@ def report_blocks(directory: Path, kind: str) -> list[Json]:
     return blocks
 
 
-def set_disposition(
-    directory: Path, ids: Sequence[str], disposition: str, note: str | None = None
-) -> list[Json]:
-    if disposition not in DISPOSITIONS:
-        raise ValueError(f"Disposition must be one of {', '.join(DISPOSITIONS)}")
-    path = directory / "review.json"
-    review = read_object(path)
-    if review is None:
-        raise ValueError(f"No review.json in {directory}")
+def findings_by_id(review: Json) -> dict[str, Json]:
     findings = review.get("findings")
-    by_id = {
+    return {
         str(finding.get("id")): finding
         for finding in (findings if isinstance(findings, list) else [])
         if isinstance(finding, dict)
     }
+
+
+def set_disposition(
+    directory: Path,
+    ids: Sequence[str],
+    disposition: str,
+    note: str | None = None,
+    round_: int | None = None,
+) -> list[Json]:
+    """Record the disposition of findings. Ids are matched within one review round: the one
+    given, else the only round that has them."""
+    if disposition not in DISPOSITIONS:
+        raise ValueError(f"Disposition must be one of {', '.join(DISPOSITIONS)}")
+    paths = review_rounds(directory)
+    if not paths:
+        raise ValueError(f"No review.json in {directory}")
+    if round_ is not None and not 1 <= round_ <= len(paths):
+        raise ValueError(f"No review round {round_} in {directory}: it has {len(paths)}")
+    reviews = [read_object(path) or {} for path in paths]
+    if round_ is None:
+        rounds = [
+            number
+            for number, review in enumerate(reviews, start=1)
+            if all(finding_id in findings_by_id(review) for finding_id in ids)
+        ]
+        if len(rounds) > 1:
+            listed = ", ".join(str(number) for number in rounds)
+            raise ValueError(f"Rounds {listed} all have {', '.join(ids)}; give --round N")
+        round_ = rounds[0] if rounds else len(paths)
+    path, review = paths[round_ - 1], reviews[round_ - 1]
+    by_id = findings_by_id(review)
     unknown = [finding_id for finding_id in ids if finding_id not in by_id]
     if unknown:
         known = ", ".join(by_id) or "none"

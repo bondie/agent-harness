@@ -41,11 +41,16 @@ class Record:
     lessons: int | None = None
     lessons_dated: int | None = None
     lessons_undated: int | None = None
+    block_mode: str | None = None
+    block_reference_median: float | None = None
+    retried: bool = False
+    check_errors: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, line: str) -> Record:
         data: dict[str, Any] = json.loads(line)
         data["cited"] = tuple(data.get("cited") or ())
+        data["check_errors"] = tuple(data.get("check_errors") or ())
         return cls(**data)
 
 
@@ -109,6 +114,10 @@ def predict(estimator: Estimator, target: Target, clock: Callable[[], float]) ->
         lessons=estimate.lessons,
         lessons_dated=estimate.lessons_dated,
         lessons_undated=estimate.lessons_undated,
+        block_mode=estimate.block_mode,
+        block_reference_median=estimate.block_reference_median,
+        retried=estimate.retried,
+        check_errors=estimate.check_errors,
     )
 
 
