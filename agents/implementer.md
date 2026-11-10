@@ -4,6 +4,7 @@ description: Use this agent to implement an analysed and approved ticket. Give i
 tools: Read, Write, Edit, Bash, Grep, Glob
 memory: user
 model: inherit
+effort: xhigh
 color: green
 ---
 

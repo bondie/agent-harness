@@ -822,9 +822,12 @@ uv run harness-eval metrics --repo ../shop ../platform          # or --json
   changes one number and later compares it with the logged time, so that is what the
   estimator leads with. Every part must cite its evidence; an increment that cites nothing
   is not allowed.
-- **The reviewer thinks hardest.** It runs on the session's model at `xhigh` effort while
-  the analyst and the estimator run on Sonnet: a defect it misses costs more than a deeper
-  review, and a review reads one diff, not the whole codebase. The traps of a codebase belong
+- **Effort where a miss is expensive.** The reviewer and the implementer run on the
+  session's model at `xhigh` effort, so the lead can run at a lower effort without the code
+  or the review getting shallower; the analyst runs on Opus, because a plan that misses a
+  consumer or a trap sends every later step the wrong way; the estimator stays on Sonnet,
+  since the eval measured its prompt on that model. A defect the reviewer misses costs more
+  than a deeper review, and a review reads one diff, not the whole codebase. The traps of a codebase belong
   in a review skill the person writes (a checklist of what went wrong before); the reviewer
   loads it when its memory or the request names it.
 - **Two human gates.** Between estimate and implementation (the expensive mistake is
