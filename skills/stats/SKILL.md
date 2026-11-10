@@ -27,6 +27,12 @@ Two more arguments compare groups of runs instead of weeks, per agent with the s
 With either, say where the numbers moved and how many runs stand behind each group: a median
 of two runs proves little.
 
+`--memory`, alone or with the others, adds the column `mem kc in/rd/sh`: per agent, the median
+thousands of characters of its own memory in a run, as the index in its prompt / topic files
+it opened with Read (without a read that an edit of the file follows within 3 calls) / output of
+Bash commands that name its memory directory (an upper bound). A `-` stands for runs without
+the fields: logged before the plugin recorded memory, or of an agent that has no memory.
+
 ```bash
 python3 - "${ARGUMENTS:-}" <<'EOF'
 import json, os, statistics, sys
@@ -38,8 +44,12 @@ if not path.is_file():
     sys.exit(f"No runs logged yet ({path}).")
 args, words = " ".join(sys.argv[1:]).split(), []
 by = split = None
+memory = False
 while args:
     arg = args.pop(0)
+    if arg == "--memory":
+        memory = True
+        continue
     if arg in ("--by", "--split") and not args:
         sys.exit(f"{arg} needs a value.")
     if arg == "--by":
@@ -80,27 +90,35 @@ agents = sorted(by_type.items(), key=lambda kv: -len(kv[1]))
 def medians(items):
     return [med([r.get("seconds") for r in items]) / 60, med([r.get("requests") for r in items]),
             med([r.get("tool_uses") for r in items]), med([(r.get("tokens") or {}).get("output_tokens") for r in items])]
-def row(agent, group, count, cells):
-    print(f"{agent[:32]:32} {group[:24]:24} {count:>4} {cells[0]:>8} {cells[1]:>8} {cells[2]:>9} {cells[3]:>11}")
+def mem(items):
+    cells = []
+    for field in ("memory_injected_chars", "memory_read_chars", "memory_bash_chars"):
+        values = [r[field] for r in items if type(r.get(field)) in (int, float)]
+        cells.append(f"{statistics.median(values) / 1000:.1f}" if values else "-")
+    return "-" if cells == ["-"] * 3 else "/".join(cells)
+def extra(cell):
+    return f" {cell:>15}" if memory and cell else ""
+def row(agent, group, count, cells, memory_cell=""):
+    print(f"{agent[:32]:32} {group[:24]:24} {count:>4} {cells[0]:>8} {cells[1]:>8} {cells[2]:>9} {cells[3]:>11}" + extra(memory_cell))
 def group_of(run):
     if moment:
         return "after" if when(run) >= moment else "before"
     return run.get("plugin_version" if by == "version" else "model") or "unknown"
 if by or moment:
-    row("agent", by or "split", "runs", ["med min", "med req", "med tools", "med out tok"])
+    row("agent", by or "split", "runs", ["med min", "med req", "med tools", "med out tok"], "mem kc in/rd/sh")
     for agent, items in agents:
         groups = {}
         for run in sorted(items, key=when):
             groups.setdefault(group_of(run), []).append(run)
         for group, members in groups.items():
             values = medians(members)
-            row(agent, group, len(members), [f"{values[0]:.1f}", *(f"{v:.0f}" for v in values[1:])])
+            row(agent, group, len(members), [f"{values[0]:.1f}", *(f"{v:.0f}" for v in values[1:])], mem(members))
         if not moment or len(groups) < 2:
             continue
         before, after = medians(groups["before"]), medians(groups["after"])
         row(agent, "change", "", [f"{a / b - 1:+.0%}" if b else "-" for a, b in zip(after, before)])
     sys.exit()
-print(f"{'agent':32} {'runs':>4} {'med min':>8} {'med req':>8} {'med tools':>9} {'med out tok':>11} {'all tok (M)':>11} {'7d vs prev':>11}")
+print(f"{'agent':32} {'runs':>4} {'med min':>8} {'med req':>8} {'med tools':>9} {'med out tok':>11} {'all tok (M)':>11} {'7d vs prev':>11}" + extra("mem kc in/rd/sh"))
 for agent, items in agents:
     total = sum(sum((r.get("tokens") or {}).values()) for r in items) / 1e6
     week = [r["seconds"] for r in items if r.get("seconds") and when(r) > now - timedelta(days=7)]
@@ -108,7 +126,7 @@ for agent, items in agents:
     trend = f"{med(week) / med(prev) - 1:+.0%}" if week and prev else "-"
     print(f"{agent[:32]:32} {len(items):>4} {med([r.get('seconds') for r in items]) / 60:>8.1f} "
           f"{med([r.get('requests') for r in items]):>8.0f} {med([r.get('tool_uses') for r in items]):>9.0f} "
-          f"{med([(r.get('tokens') or {}).get('output_tokens') for r in items]):>11.0f} {total:>11.1f} {trend:>11}")
+          f"{med([(r.get('tokens') or {}).get('output_tokens') for r in items]):>11.0f} {total:>11.1f} {trend:>11}" + extra(mem(items)))
 EOF
 ```
 

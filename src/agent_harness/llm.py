@@ -86,7 +86,8 @@ OFFLINE = """
 This run is a backtest. Tools are unavailable: the message holds everything you may use, and
 the reference class in it was already retrieved with the cut-off of the ticket's creation
 time. Answer with the JSON object only: median_hours, p25_hours, p75_hours, cited (the keys
-of the tickets you relied on) and reasoning (at most three sentences).
+of the tickets you relied on) and reasoning (at most three sentences). There are no memory
+files to open: the lessons you may use, if any, are already in this prompt.
 """
 
 OFFLINE_STRUCTURED = """
@@ -96,6 +97,7 @@ This run is a backtest. Tools are unavailable: the message holds everything you 
 the reference class in it was already retrieved with the cut-off of the ticket's creation
 time. The ticket comes without an implementation plan. Answer with the body of the
 harness-estimate block only (see Answer): one JSON object, without the report around it.
+There are no memory files to open: the lessons you may use, if any, are already in this prompt.
 """
 
 STRUCTURED = "-structured"

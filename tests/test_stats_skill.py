@@ -254,6 +254,62 @@ def test_the_split_is_local_time_unless_it_has_a_zone(tmp_path, tz, split, befor
     assert change_row.split()[1:] == ["change", change, "+0%", "+0%", "+0%"]
 
 
+MEMORY_FIELDS = ("memory_injected_chars", "memory_read_chars", "memory_bash_chars")
+
+
+def with_memory(seed: int) -> list[dict[str, Any]]:
+    rng = np.random.default_rng(seed)
+    runs = random_runs(seed)
+    for index, run in enumerate(runs):
+        if run["agent_type"] == "Explore" or index % 3 == 0:
+            continue
+        for field in MEMORY_FIELDS[index % 3 - 1 :]:
+            run[field] = int(rng.integers(0, 60000))
+    return runs
+
+
+def memory_cell(items: list[dict[str, Any]]) -> str:
+    found = [[r[field] for r in items if field in r] for field in MEMORY_FIELDS]
+    cells = [f"{median(values) / 1000:.1f}" if values else "-" for values in found]
+    return "-" if cells == ["-"] * 3 else "/".join(cells)
+
+
+@pytest.mark.parametrize("seed", [5, 6])
+def test_memory_adds_a_column_where_old_lines_show_a_dash(tmp_path, seed):
+    runs = with_memory(seed)
+    plain = table(tmp_path, runs)
+
+    [header, *rows] = table(tmp_path, runs, "--memory")
+
+    assert header == f"{plain[0]} {'mem kc in/rd/sh':>15}"
+    assert [row.rsplit(" ", 1)[0].rstrip() for row in rows] == [row.rstrip() for row in plain[1:]]
+    expected = {agent: memory_cell(items) for agent, items in latest(runs).items()}
+    assert {row.split()[0]: row.split()[-1] for row in rows} == expected
+    assert expected["Explore"] == "-"
+    assert "/" in expected["agent-harness:implementer"]
+
+
+def test_memory_with_split_adds_the_column_to_each_group_but_not_the_change(tmp_path):
+    runs = with_memory(7)
+    moment = NOW - timedelta(days=12)
+
+    [header, *rows] = table(tmp_path, runs, f"--split {stamp(moment)} --memory")
+
+    assert header.split()[-3:] == ["mem", "kc", "in/rd/sh"]
+    expected = {}
+    for agent, items in latest(runs).items():
+        before = [r for r in items if ended(r) < moment]
+        after = [r for r in items if ended(r) >= moment]
+        for side, members in (("before", before), ("after", after)):
+            if members:
+                expected[agent, side] = memory_cell(members)
+    changes = [row for row in rows if row.split()[1] == "change"]
+    assert changes
+    assert all(len(row.split()) == 6 and row == row.rstrip() for row in changes)
+    found = {tuple(row.split()[:2]): row.split()[-1] for row in rows if row not in changes}
+    assert found == expected
+
+
 @pytest.mark.parametrize(
     ("args", "message"),
     [

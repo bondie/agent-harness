@@ -32,7 +32,7 @@ TRAILER = re.compile(
     r"(?:\s*,\s*expires\s+(?P<expires>\d{4}-\d{2}-\d{2}))?\)[ \t]*$",
     re.M,
 )
-ABSOLUTE_PATH = re.compile(r"(?<![\w.~/:-])~?/[^\s`'\"()\[\]{}<>,;|*$]+")
+ABSOLUTE_PATH = re.compile(r"(?<![\w.~/:>}*-])~?/[^\s`'\"()\[\]{}<>,;:|*$]+")
 PLACEHOLDER = set("<>{}*$")
 EXCERPT = 80
 
@@ -183,7 +183,7 @@ def dead_paths(text: str) -> list[str]:
     for match in ABSOLUTE_PATH.finditer(text):
         if text[match.end() : match.end() + 1] in PLACEHOLDER:
             continue
-        token = match.group().rstrip(".:")
+        token = match.group().rstrip(".")
         path = Path(token).expanduser()
         if len(path.parts) < 2 or not _exists(Path(*path.parts[:2])):
             continue

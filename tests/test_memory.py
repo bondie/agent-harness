@@ -100,6 +100,17 @@ def test_dead_paths_are_missing_paths_under_an_existing_top_directory(tmp_path):
     assert memory.dead_paths(text) == [f"{tmp_path}/gone/file.txt"]
 
 
+def test_only_the_host_side_of_a_mapping_and_no_path_after_a_placeholder_is_checked(tmp_path):
+    (tmp_path / "kept.txt").write_text("x")
+    text = (
+        f"-v {tmp_path}/kept.txt:/app/kept.txt:ro, {tmp_path}/gone/file.txt:42 "
+        f"and {tmp_path}/<v>/etc/nope"
+    )
+
+    assert memory.dead_paths(text) == [f"{tmp_path}/gone/file.txt"]
+    assert memory.dead_paths(f"-v {tmp_path}/gone:/app") == [f"{tmp_path}/gone"]
+
+
 def test_a_path_that_cannot_be_checked_is_not_dead(tmp_path, monkeypatch):
     def refuse(path: Path, **options: bool) -> bool:
         raise PermissionError(path)
