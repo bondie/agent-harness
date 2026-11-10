@@ -5,7 +5,10 @@ It parses the Bash command, including chains, pipes, subshells, `bash -c`, `eval
 `sudo`/`env` prefixes and heredocs fed to a shell, and denies with the rule and a safe
 alternative: force-pushes and pushes that delete remote refs, `git reset --hard`/`clean -f`/
 `checkout .`/`checkout -f`/`restore .` and `git branch -D` outside the allowed temp dirs,
-`rm -r` and `find -delete`/`-exec rm` outside the allowed dirs (temp dirs, build and cache
+writes to the history, the remote or the forge from a subagent (`git commit`, `push`, `merge`,
+`tag`, `rebase`, `cherry-pick`, `revert`, `am`; `gh`/`glab` merge requests, releases and API
+writes) unless its type is in `git_write_allow_agents` or the repository is inside the temp
+dirs, `rm -r` and `find -delete`/`-exec rm` outside the allowed dirs (temp dirs, build and cache
 dirs in the project, `allowed_rm_dirs`), raw reads of secret files (also through `<`), copies
 of them, environment dumps, macOS keychain reads, connections to production database hosts,
 DROP/TRUNCATE in or piped into a database client command, and a `$(` never closed. Shell
@@ -26,7 +29,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
@@ -60,6 +63,7 @@ DEFAULTS: dict[str, Any] = {
     "safe_filters": [],
     "extra_deny": [],
     "tampering_allow_agents": ["statusline-setup"],
+    "git_write_allow_agents": [],
 }
 LIST_KEYS = {
     "secret_globs",
@@ -69,6 +73,7 @@ LIST_KEYS = {
     "safe_filters",
     "extra_deny",
     "tampering_allow_agents",
+    "git_write_allow_agents",
 }
 REGEX_KEYS = {"prod_db_hosts", "safe_filters"}
 # Settings of other guard hooks that share this config; they validate their own.
@@ -123,6 +128,41 @@ DB_CLIENTS = {"mysql", "mariadb", "psql", "mongosh", "mongo", "redis-cli"}
 DB_HOST_ENV = {"PGHOST", "MYSQL_HOST"}
 DESTRUCTIVE_SQL = re.compile(r"\b(?:DROP\s+(?:DATABASE|TABLE|SCHEMA)\b|TRUNCATE\b(?!\s*\())", re.I)
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+GIT_WRITES = {"commit", "push", "merge", "rebase", "cherry-pick", "revert", "am"}
+GIT_WRITES |= {"commit-tree", "update-ref", "filter-branch", "filter-repo", "fast-import"}
+FETCH_VALUES = {"--depth", "--deepen", "--shallow-since", "--shallow-exclude", "--upload-pack"}
+FETCH_VALUES |= {"--server-option", "--refmap", "--negotiation-tip", "--jobs"}
+SUBTREE_WRITES = {"push", "merge", "pull", "add"}
+SUBTREE_VALUES = {"--prefix", "--message", "--onto", "--branch"}
+TAG_LISTS = {"-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged"}
+TAG_LISTS |= {"--points-at", "-v", "--verify", "-n", "--column"}
+ABORTABLE = {"merge", "rebase", "cherry-pick", "am", "revert"}
+RESET_VALUES = {"--pathspec-from-file"}
+TAG_VALUES = {"--message", "--file", "--local-user", "--sort", "--format", "--cleanup"}
+PUSH_VALUES = {"--repo", "--push-option", "--receive-pack", "--exec"}
+FORGE_WRITES: dict[str, dict[str, set[str]]] = {
+    "gh": {
+        "pr": {"create", "new", "merge", "close", "reopen", "edit", "ready"},
+        "release": {"create", "delete", "edit", "upload"},
+        "repo": {"delete", "create", "edit", "rename", "archive", "sync"},
+        "workflow": {"run"},
+        "secret": {"set", "delete"},
+        "variable": {"set", "delete"},
+        "gist": {"create", "new", "edit", "delete"},
+    },
+    "glab": {
+        "mr": {"create", "new", "merge", "accept", "close", "reopen", "update", "approve"}
+        | {"unapprove", "rebase"},
+        "release": {"create", "delete", "upload"},
+        "repo": {"delete"},
+        "ci": {"run", "retry", "cancel"},
+        "variable": {"set", "update", "delete"},
+    },
+}
+FORGE_VALUES = {"-R", "--repo"}
+API_VALUES = {"--method", "--header", "--raw-field", "--field", "--jq", "--template"}
+API_VALUES |= {"--preview", "--input", "--cache", "--hostname"}
+API_FIELDS = {"-f", "-F", "--field", "--raw-field", "--input"}
 WHOLE_TREE = {".", "./", "*", ":/", ":/.", ":/*", ":(top)", ":(top)."}
 CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"}
 CONFIG_CHANGES = {"--unset", "--unset-all", "--add", "--replace-all", "unset"}
@@ -163,6 +203,10 @@ TAMPER_PROCEED = (
     "leave it to the person and put the change you need in your report; a copy inside the "
     "temp dir or scratchpad may be changed."
 )
+GIT_WRITE_PROCEED = (
+    "leave the commit, push or MR to the team lead and put it in your report. A repository "
+    "inside the temp dir or scratchpad may be committed to, and pushed to a path there."
+)
 
 
 @dataclass
@@ -177,6 +221,7 @@ class Config:
     safe_filters: list[re.Pattern[str]]
     extra_deny: list[tuple[re.Pattern[str], str]]
     tampering_allow_agents: list[str]
+    git_write_allow_agents: list[str]
     warnings: list[str]
 
 
@@ -321,6 +366,7 @@ def load_config(environ: Mapping[str, str], project: Path | None) -> Config:
         safe_filters=[re.compile(p) for p in settings["safe_filters"]],
         extra_deny=[(re.compile(i["pattern"]), i["reason"]) for i in settings["extra_deny"]],
         tampering_allow_agents=settings["tampering_allow_agents"],
+        git_write_allow_agents=settings["git_write_allow_agents"],
         warnings=warnings,
     )
 
@@ -828,6 +874,104 @@ def force_deletes(args: list[str]) -> bool:
     return deletes and ("--force" in args or any(short_flag(arg, "f", "u") for arg in args))
 
 
+def tag_writes(args: list[str]) -> bool:
+    """`git tag` that names a tag to create or delete; listing and verifying only read."""
+    flags, operands = parse(args, "mFu", TAG_VALUES)
+    return bool(operands) and not flags & TAG_LISTS
+
+
+def asks_help(args: list[str]) -> bool:
+    return "--help" in args or "-h" in args
+
+
+def before_paths(args: list[str]) -> list[str]:
+    if "--" not in args:
+        return args
+    return args[: args.index("--")]
+
+
+def moves_branch(sub: str, args: list[str], is_path: Callable[[str], bool]) -> bool:
+    """`branch -f`/`-M`/`-C`, `checkout -B`, `switch -C` and `reset <commit>` (with `--soft`
+    too): they move or overwrite a branch without a commit; `reset --hard` is a discard, and
+    `reset <path>` only unstages."""
+    if sub == "branch":
+        forced = "--force" in args or any(short_flag(a, f, "u") for a in args for f in "fMC")
+        return forced and not force_deletes(args)
+    if sub == "checkout":
+        return any(short_flag(arg, "B", "b") for arg in args)
+    if sub == "switch":
+        return "--force-create" in args or any(short_flag(arg, "C", "c") for arg in args)
+    if sub != "reset" or "--hard" in args:
+        return False
+    _, operands = parse(before_paths(args), "", RESET_VALUES)
+    if not operands or operands[0] in ("HEAD", "@", "."):
+        return False
+    return not is_path(operands[0])
+
+
+def fetch_writes(args: list[str]) -> bool:
+    """A refspec that forces (`+`) or lands outside `refs/remotes/`, so it moves a local ref."""
+    _, operands = parse(args, "jo", FETCH_VALUES)
+    for refspec in operands[1:]:
+        destination = refspec.partition(":")[2]
+        if refspec.startswith("+") or (destination and not destination.startswith("refs/remotes/")):
+            return True
+    return False
+
+
+def subtree_writes(args: list[str]) -> bool:
+    flags, operands = parse(args, "Pmb", SUBTREE_VALUES)
+    command = (operands or [""])[0]
+    return command in SUBTREE_WRITES or (command == "split" and "--rejoin" in flags)
+
+
+def writes_history(sub: str, args: list[str], is_path: Callable[[str], bool]) -> bool:
+    if asks_help(args) or (sub in ABORTABLE and "--abort" in args):
+        return False
+    if "--dry-run" in args and sub in ("commit", "push"):
+        return False
+    if sub == "push" and any(short_flag(arg, "n", "o") for arg in args):
+        return False
+    if sub == "tag":
+        return tag_writes(args)
+    if sub == "fetch":
+        return fetch_writes(args)
+    if sub == "subtree":
+        return subtree_writes(args)
+    return sub in GIT_WRITES or moves_branch(sub, args, is_path)
+
+
+def push_path(args: list[str]) -> str | None:
+    """The destination of `git push` when it is a local path; a remote name or URL is not."""
+    values: dict[str, list[str]] = {}
+    _, operands = parse(args, "o", PUSH_VALUES, values)
+    target = (values.get("--repo") or operands or [""])[0]
+    if target.startswith("file://"):
+        return target.removeprefix("file://")
+    if target.startswith(("/", "./", "../")):
+        return target
+    return None
+
+
+def forge_command(args: list[str]) -> tuple[str, str, list[str]]:
+    """The command group, its action and the arguments after them, past `-R`/`--repo`."""
+    i = skip_options(args, 0, FORGE_VALUES)
+    group = (args[i:] or [""])[0]
+    j = skip_options(args, i + 1, FORGE_VALUES)
+    action = (args[j:] or [""])[0]
+    return group, action, args[i + 1 :]
+
+
+def api_writes(args: list[str]) -> bool:
+    """`gh api`/`glab api` with a method other than GET or HEAD, or fields (an implicit POST)."""
+    values: dict[str, list[str]] = {}
+    flags, _ = parse(args, "XHfFqtp", API_VALUES, values)
+    methods = values.get("-X", []) + values.get("--method", [])
+    if methods:
+        return any(method.upper() not in ("GET", "HEAD") for method in methods)
+    return bool(flags & API_FIELDS)
+
+
 def sets_hooks_path(args: list[str]) -> bool:
     keys = [i for i, arg in enumerate(args) if arg.lower() == "core.hookspath"]
     if not keys or CONFIG_READS & set(args):
@@ -909,6 +1053,7 @@ class Checker:
         subagent: bool,
         project: str | None = None,
         may_change_user_settings: bool = False,
+        may_write_git: bool = False,
     ) -> None:
         self.config = config
         self.environ = environ
@@ -920,6 +1065,7 @@ class Checker:
         self.project = os.path.realpath(project) if project else None
         self.live = live_guards(environ)
         self.own_settings = user_settings(environ) if may_change_user_settings else []
+        self.git_writes = subagent and not may_write_git
 
     def script(self, text: str, depth: int = 0) -> Denial | None:
         if depth > MAX_DEPTH:
@@ -992,6 +1138,8 @@ class Checker:
             return self.find(call)
         if name == "git":
             return self.git(call, items, index)
+        if name in FORGE_WRITES:
+            return self.forge(call)
         if name in READERS:
             return self.secret_read(call, command, items, index)
         if name in SECRET_COPIERS:
@@ -1152,16 +1300,27 @@ class Checker:
 
     def git(self, call: Call, items: list[Command | str], index: int) -> Denial | None:
         dirs = list(self.cwds)
+        work = list(self.cwds)
+        git_dir = call.env.get("GIT_DIR")
         args = call.args
         i = 0
         while i < len(args) and args[i].startswith("-"):
             arg = args[i]
-            value = args[i + 1] if arg in ("-C", "--work-tree") and i + 1 < len(args) else None
-            value = arg.split("=", 1)[1] if arg.startswith("--work-tree=") else value
-            dirs = [self.path(value, d) for d in dirs] if value is not None else dirs
+            name, _, value = arg.partition("=")
+            if not value and name == arg and arg in GIT_VALUE_OPTIONS and i + 1 < len(args):
+                value = args[i + 1]
+            if value and name in ("-C", "--work-tree"):
+                dirs = [self.path(value, d) for d in dirs]
+            if value and name == "--git-dir":
+                git_dir = value
+            if value and name == "-C":
+                work = [self.path(value, d) for d in work]
             i += 2 if arg in GIT_VALUE_OPTIONS else 1
         if i >= len(args):
             return None
+        repos = None
+        if git_dir is not None:
+            repos = [self.path(git_dir, d) for d in work]
         sub, rest = args[i], args[i + 1 :]
         if any("core.hookspath" in arg.lower() for arg in args[:i]) or (
             sub == "config" and sets_hooks_path(rest)
@@ -1172,11 +1331,14 @@ class Checker:
                 "hooks than the repository's",
                 "leave it to the person and put the change you need in your report.",
             )
-        if sub == "push":
-            return self.push(rest)
+        if sub == "push" and (forced := self.push(rest)) is not None:
+            return forced
+        if writes_history(sub, rest, lambda arg: self.existing(arg, work)):
+            return self.git_write(sub, rest, work, repos)
         if sub in ("show", "log"):
             return self.git_secret(sub, rest, items, index)
-        if sub == "branch" and force_deletes(rest) and not all(self.inside(d) for d in dirs):
+        scratch = self.scratch(work, repos)
+        if sub == "branch" and force_deletes(rest) and not scratch:
             return Denial(
                 "branch-force-delete",
                 "`git branch -D` (or `--delete --force`) deletes a branch even when its commits "
@@ -1185,13 +1347,102 @@ class Checker:
                 "person. It is allowed in a repository inside the temp dir or scratchpad.",
             )
         discard = self.discards(sub, rest, dirs)
-        if discard is None or all(self.inside(d) for d in dirs):
+        if discard is None or (scratch and all(self.temp(d) for d in dirs)):
             return None
         return Denial(
             "git-discard",
             f"`git {discard}` throws away uncommitted work and cannot be undone",
             "keep the work with `git stash` or a commit, discard single files by name, or ask "
             "the person. It is allowed only in a repository inside the temp dir or scratchpad.",
+        )
+
+    def git_write(
+        self, sub: str, rest: list[str], work: list[str | None], repos: list[str | None] | None
+    ) -> Denial | None:
+        """Commits and the like in a repository inside the temp dirs pass, and pushes to a path
+        there; the rest is the team lead's. `--git-dir` or `GIT_DIR` names the repository when
+        given, otherwise the `.git` above the working directory does (`--work-tree` does not)."""
+        if not self.git_writes:
+            return None
+        if sub != "push" and self.scratch(work, repos):
+            return None
+        target = None
+        if sub == "push":
+            target = push_path(rest)
+        if target is not None and all(self.temp(self.path(target, d)) for d in work):
+            return None
+        return Denial(
+            "git-write",
+            f"`git {sub}` writes the repository's history or the remote, which is the team "
+            "lead's to do after the person approves",
+            GIT_WRITE_PROCEED,
+        )
+
+    def temp(self, path: str | None) -> bool:
+        """Below the temp dir or scratchpad; unlike `inside`, not the project's build dirs."""
+        if path is None:
+            return False
+        parents = [str(parent) for parent in PurePath(path).parents]
+        return any(fnmatchcase(p, pattern) for p in parents for pattern in self.config.rm_dirs)
+
+    def existing(self, arg: str, work: list[str | None]) -> bool:
+        paths = [self.path(arg, d) for d in work]
+        return all(path is not None and Path(path).exists() for path in paths)
+
+    def scratch(self, work: list[str | None], repos: list[str | None] | None) -> bool:
+        """A repository inside the temp dirs: the one `--git-dir` or `GIT_DIR` names, otherwise
+        the one git finds above the working directory."""
+        if repos is not None:
+            return all(self.scratch_git_dir(d) for d in repos)
+        return all(self.scratch_repo(d) for d in work)
+
+    def scratch_git_dir(self, path: str | None) -> bool:
+        """A git dir inside the temp dirs, links resolved; a `.git` file counts by the `gitdir:`
+        it points to, and one that cannot be read counts as outside."""
+        if path is not None:
+            path = os.path.realpath(path)
+        if path is None or not self.temp(path):
+            return False
+        try:
+            if not Path(path).is_file():
+                return True
+            text = Path(path).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return False
+        if not text.startswith("gitdir:"):
+            return False
+        target = self.path(text.removeprefix("gitdir:").strip(), str(Path(path).parent))
+        return target is not None and self.temp(target)
+
+    def scratch_repo(self, path: str | None) -> bool:
+        """A working directory inside the temp dirs whose repository, the first `.git` above it
+        up to `/`, is there too; without a `.git` git fails anyway."""
+        if path is None or not self.temp(path):
+            return False
+        for parent in [path, *map(str, PurePath(path).parents)]:
+            dot_git = Path(parent, ".git")
+            if dot_git.is_symlink() or dot_git.exists():
+                return self.scratch_git_dir(str(dot_git))
+        return True
+
+    def forge(self, call: Call) -> Denial | None:
+        group, action, rest = forge_command(call.args)
+        what = f"`{call.program} {group} {action}`"
+        writes = action in FORGE_WRITES[call.program].get(group, set())
+        if call.program == "gh" and group == "pr" and action == "review":
+            verdicts = {"--approve", "--request-changes"}
+            writes = bool(verdicts & set(rest)) or any(
+                short_flag(arg, letter, "bF") for arg in rest for letter in "ar"
+            )
+        if group == "api":
+            what, writes = f"`{call.program} api` with a write method or fields", api_writes(rest)
+        if not writes or not self.git_writes or asks_help(rest):
+            return None
+        return Denial(
+            "git-write",
+            f"{what} writes to the forge (a merge request, release, repository or API "
+            "resource), which is the team lead's to do after the person approves",
+            GIT_WRITE_PROCEED,
         )
 
     def push(self, rest: list[str]) -> Denial | None:
@@ -1441,7 +1692,8 @@ def check(event: dict[str, Any], environ: Mapping[str, str]) -> tuple[Denial | N
     if config.scope != "all" and not subagent:
         return None, config.warnings
     exempt = isinstance(agent, str) and agent in config.tampering_allow_agents
-    checker = Checker(config, environ, cwd or project_dir, subagent, project_dir, exempt)
+    writer = isinstance(agent, str) and agent in config.git_write_allow_agents
+    checker = Checker(config, environ, cwd or project_dir, subagent, project_dir, exempt, writer)
     if tool != "Bash":
         return checker.tamper_denial(f"`{tool}`", [command]), config.warnings
     denial = checker.script(command)
