@@ -39,7 +39,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "scipy", specifier = ">=1.13" },
-    { name = "ticket-precedent", git = "https://github.com/bondie/ticket-precedent?rev=20c14c1e36d916040959442b3a5a6a9b9d81ee73" },
+    { name = "ticket-precedent", git = "https://github.com/bondie/ticket-precedent?rev=28c9e0f20bdae513d9d80406e46caf3c099fa041" },
 ]
 
 [package.metadata.requires-dev]
@@ -1782,7 +1782,7 @@ wheels = [
 [[package]]
 name = "ticket-precedent"
 version = "0.1.0"
-source = { git = "https://github.com/bondie/ticket-precedent?rev=20c14c1e36d916040959442b3a5a6a9b9d81ee73#20c14c1e36d916040959442b3a5a6a9b9d81ee73" }
+source = { git = "https://github.com/bondie/ticket-precedent?rev=28c9e0f20bdae513d9d80406e46caf3c099fa041#28c9e0f20bdae513d9d80406e46caf3c099fa041" }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },

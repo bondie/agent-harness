@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
-from ticket_precedent.config import build_searcher, load_config
+from ticket_precedent.config import (
+    ALL_PLATFORMS,
+    Config,
+    build_searcher,
+    default_config_path,
+    load_config,
+)
 from ticket_precedent.search import Searcher
 from ticket_precedent.store import Store
 
@@ -40,7 +48,7 @@ from .gitlog import (
 from .llm import STRUCTURED, WITH_MEMORY, Backend, ClaudeCode, LLMEstimator, Ollama
 from .memory import Memory, load_memory
 from .report import report
-from .runner import load_run, run
+from .runner import claim_directory, load_run, run
 
 BASELINES = ("neighbour-median", "recent-median", "era-scaled-median", "human")
 LLM_CONTEXTS = ("llm-none", "llm-keyword", "llm-hybrid", "llm-hybrid-recent")
@@ -89,6 +97,11 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument("--change", default="2026-01-01", help="date of a process change")
     cmd.add_argument("--process-note", help="what changed, told to the LLM variants")
     cmd.add_argument("--config", type=Path, help="ticket-precedent configuration file")
+    cmd.add_argument(
+        "--platform",
+        help="take the tickets and their reference classes from this platform's sources "
+        f"(default: the config's default_platform; {ALL_PLATFORMS}: every source)",
+    )
     cmd.add_argument("--memory", type=Path, help="agent memory directory for +memory variants")
     cmd.set_defaults(handler=_run)
 
@@ -197,19 +210,67 @@ def _team_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]
 
 
 def _run(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+    config = _load_config(args.config)
+    platform, sources = config.scope(args.platform)
+    _refuse_mixed_platforms(config, args.platform, sources)
     store = Store(config.index_path)
     searcher = build_searcher(config, store)
-    targets = load_targets(store, args.created_from, args.created_to, args.max_hours)
+    targets = load_targets(
+        store, args.created_from, args.created_to, args.max_hours, sources=sources
+    )
     targets = sample(targets, args.sample, args.seed)
-    estimators = build_estimators(args, searcher)
-    print(f"{len(targets)} tickets, variants: {[e.name for e in estimators]}", file=sys.stderr)
+    estimators = build_estimators(args, searcher, sources)
+    warning = claim_directory(args.out, _manifest(config, platform, sources))
+    if warning:
+        print(warning, file=sys.stderr)
+    print(
+        f"platform {platform or ALL_PLATFORMS}: {len(targets)} tickets, "
+        f"variants: {[e.name for e in estimators]}",
+        file=sys.stderr,
+    )
     run(estimators, targets, args.out, progress=_progress)
     print(file=sys.stderr)
     return 0
 
 
-def build_estimators(args: argparse.Namespace, searcher: Searcher) -> list[Estimator]:
+def _load_config(path: Path | None) -> Config:
+    """A named config that is missing must not fall back to every source of the default index."""
+    named_by = "--config"
+    if path is None and os.environ.get("TICKET_PRECEDENT_CONFIG"):
+        path, named_by = default_config_path(), "TICKET_PRECEDENT_CONFIG"
+    if path is None or path.exists():
+        return load_config(path)
+    raise ValueError(f"{named_by} names {path}, which does not exist")
+
+
+def _manifest(
+    config: Config, platform: str | None, sources: frozenset[str] | None
+) -> dict[str, Any]:
+    manifest: dict[str, Any] = {
+        "platform": platform or ALL_PLATFORMS,
+        "sources": None,
+        "index_path": str(config.index_path.resolve()),
+    }
+    if sources is not None:
+        manifest["sources"] = sorted(sources)
+    return manifest
+
+
+def _refuse_mixed_platforms(
+    config: Config, platform: str | None, sources: frozenset[str] | None
+) -> None:
+    known = sorted({item.platform for item in config.sources if item.platform})
+    if sources is not None or platform == ALL_PLATFORMS or not known:
+        return
+    raise ValueError(
+        f"No platform chosen and the sources have platforms {known}: give --platform NAME, "
+        f"--platform {ALL_PLATFORMS} to mix them, or set default_platform in the config"
+    )
+
+
+def build_estimators(
+    args: argparse.Namespace, searcher: Searcher, sources: frozenset[str] | None = None
+) -> list[Estimator]:
     estimators: list[Estimator] = []
     memory: Memory | None = None
     for variant in (name.strip() for name in args.variants.split(",") if name.strip()):
@@ -218,7 +279,7 @@ def build_estimators(args: argparse.Namespace, searcher: Searcher) -> list[Estim
         structured = context.endswith(STRUCTURED)
         context = context.removesuffix(STRUCTURED)
         if context not in LLM_CONTEXTS:
-            estimators.append(baseline(variant, args, searcher))
+            estimators.append(baseline(variant, args, searcher, sources))
             continue
         if not args.backend:
             raise ValueError(f"{variant} needs at least one --backend")
@@ -233,6 +294,7 @@ def build_estimators(args: argparse.Namespace, searcher: Searcher) -> list[Estim
                 context=context.removeprefix("llm-").removesuffix("-recent"),
                 k=args.k,
                 since=args.change if context.endswith("-recent") else None,
+                sources=sources,
                 process_note=args.process_note,
                 structured=structured,
                 memory=memory if with_memory else None,
@@ -242,13 +304,20 @@ def build_estimators(args: argparse.Namespace, searcher: Searcher) -> list[Estim
     return estimators
 
 
-def baseline(variant: str, args: argparse.Namespace, searcher: Searcher) -> Estimator:
+def baseline(
+    variant: str,
+    args: argparse.Namespace,
+    searcher: Searcher,
+    sources: frozenset[str] | None = None,
+) -> Estimator:
     if variant == "neighbour-median":
-        return NeighbourMedian(searcher, k=args.k)
+        return NeighbourMedian(searcher, k=args.k, sources=sources)
     if variant == "recent-median":
-        return NeighbourMedian(searcher, k=args.k, since=args.change, name="recent-median")
+        return NeighbourMedian(
+            searcher, k=args.k, since=args.change, sources=sources, name="recent-median"
+        )
     if variant == "era-scaled-median":
-        return EraScaledMedian(searcher, k=args.k, change=args.change)
+        return EraScaledMedian(searcher, k=args.k, change=args.change, sources=sources)
     if variant == "human":
         return HumanEstimate()
     raise ValueError(f"Unknown variant {variant!r}")

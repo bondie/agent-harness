@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import sqlite3
 from collections.abc import Sequence
@@ -48,21 +49,28 @@ def load_targets(
     created_to: str,
     max_hours: float = 40.0,
     statuses: Sequence[str] = DONE_STATUSES,
+    sources: frozenset[str] | None = None,
 ) -> list[Target]:
     """Finished tickets created in [created_from, created_to) with logged time up to max_hours.
 
     Tickets above max_hours are usually epics or long-running buckets, not estimable tasks.
     """
-    placeholders = ",".join("?" * len(statuses))
     rows = store.db.execute(
-        f"""
+        """
         SELECT * FROM tickets
-        WHERE time_spent_seconds > 0 AND time_spent_seconds <= ?
-          AND created >= ? AND created < ?
-          AND status IN ({placeholders})
+        WHERE time_spent_seconds > 0 AND time_spent_seconds <= :max_seconds
+          AND created >= :created_from AND created < :created_to
+          AND status IN (SELECT value FROM json_each(:statuses))
+          AND (:sources IS NULL OR source IN (SELECT value FROM json_each(:sources)))
         ORDER BY created, key
         """,
-        (max_hours * 3600, created_from, created_to, *statuses),
+        {
+            "max_seconds": max_hours * 3600,
+            "created_from": created_from,
+            "created_to": created_to,
+            "statuses": json.dumps(list(statuses)),
+            "sources": _json_list(sources),
+        },
     ).fetchall()
     return [Target.from_row(row) for row in rows]
 
@@ -80,6 +88,7 @@ def finished_hours(
     as_of: str,
     created_from: str | None = None,
     created_to: str | None = None,
+    sources: frozenset[str] | None = None,
 ) -> list[float]:
     """Logged hours of every ticket whose time was final before `as_of`."""
     rows = store.db.execute(
@@ -89,7 +98,19 @@ def finished_hours(
           AND COALESCE(last_logged, updated) < :as_of
           AND (:created_from IS NULL OR created >= :created_from)
           AND (:created_to IS NULL OR created < :created_to)
+          AND (:sources IS NULL OR source IN (SELECT value FROM json_each(:sources)))
         """,
-        {"as_of": as_of, "created_from": created_from, "created_to": created_to},
+        {
+            "as_of": as_of,
+            "created_from": created_from,
+            "created_to": created_to,
+            "sources": _json_list(sources),
+        },
     )
     return [row["time_spent_seconds"] / 3600 for row in rows]
+
+
+def _json_list(values: frozenset[str] | None) -> str | None:
+    if values is None:
+        return None
+    return json.dumps(sorted(values))
