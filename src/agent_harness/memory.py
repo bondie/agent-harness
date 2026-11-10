@@ -1,4 +1,4 @@
-"""Agent memory lessons: `harness-eval memory lint|prune` and the backtest's memory variants.
+"""Agent memory: `harness-eval memory lint|prune|compact` and the backtest's memory variants.
 
 A lesson is one bullet that ends with its source and date, and optionally an expiry:
 `- <lesson text> (source: <KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])`. Lines
@@ -13,9 +13,13 @@ without a date cannot be placed in time, so it is left out.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import posixpath
 import re
+import unicodedata
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -32,6 +36,7 @@ TRAILER = re.compile(
     r"(?:\s*,\s*expires\s+(?P<expires>\d{4}-\d{2}-\d{2}))?\)[ \t]*$",
     re.M,
 )
+FENCE = re.compile(r"(`{3,}|~{3,})")
 ABSOLUTE_PATH = re.compile(r"(?<![\w.~/:>}*-])~?/[^\s`'\"()\[\]{}<>,;:|*$]+")
 PLACEHOLDER = set("<>{}*$")
 EXCERPT = 80
@@ -145,6 +150,19 @@ def _date(value: str | None) -> date | None:
         return None
 
 
+def _opens(line: str) -> str:
+    """The fence a line opens: a run of three or more backticks or tildes, or nothing."""
+    match = FENCE.match(line)
+    if match is None:
+        return ""
+    return match[1]
+
+
+def _closes(line: str, fence: str) -> bool:
+    """A run of the fence's character at least as long as it, with only spaces after."""
+    return re.fullmatch(f"{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", _bare(line)) is not None
+
+
 def _front_matter_end(lines: list[str]) -> int:
     if not lines or lines[0].strip() != "---":
         return 0
@@ -173,10 +191,11 @@ def lessons(text: str, index: bool = False) -> list[Lesson]:
     start = _front_matter_end(lines)
     for number, line in enumerate(lines[start:], start + 1):
         if fence:
-            fence = "" if line.startswith(fence) else fence
+            if _closes(line, fence):
+                fence = ""
             continue
-        if line.startswith(("```", "~~~")):
-            fence, current = line[:3], None
+        if _opens(line):
+            fence, current = _opens(line), None
             continue
         if current is not None and line.startswith(("  ", "\t")) and line.strip():
             current.append(line.rstrip())
@@ -385,3 +404,589 @@ def prune(root: Path, today: date, apply: bool) -> str:
     for path, gone in by_file.items():
         remove(path, gone)
     return "\n".join([*lines, f"Removed {counted}."]) + "\n"
+
+
+KEEP = "<!-- keep -->"
+HEADING = re.compile(r"(#{1,6})[ \t]+(.*?)[ \t]*$")
+LINE = re.compile(r"[^\n]*\n|[^\n]+")
+LINK_TARGET = re.compile(r"\]\(([^)\s]+\.md)\)")
+MEMORY_TYPE = re.compile(
+    r"^metadata:[ \t]*\r?\n(?:[ \t]+\S.*\r?\n)*?[ \t]+type:[ \t]*([^\s\"']+)", re.M
+)
+Numbered = list[tuple[int, str]]
+
+
+class CompactionError(ValueError):
+    """The memory changed since the proposal, or a check after the move failed."""
+
+
+@dataclass(frozen=True)
+class Move:
+    source: Path
+    target: Path
+    title: str
+    first: int
+    last: int
+    lessons: int
+    size: int
+    new: bool
+
+
+@dataclass(frozen=True)
+class Section:
+    start: int
+    end: int
+    title: str
+    size: int
+
+
+@dataclass
+class Compaction:
+    """A proposal of verbatim moves: the files as read, as they will be, and why.
+
+    `sizes` holds per file at its warning mark the size before and after, its cap and whether
+    it stays at the mark; `pointers` and `front_matter` are the only lines the moves add.
+    """
+
+    root: Path
+    moves: list[Move] = field(default_factory=list)
+    sizes: dict[Path, tuple[int, int, float, bool]] = field(default_factory=dict)
+    notes: dict[Path, list[str]] = field(default_factory=dict)
+    before: dict[Path, str | None] = field(default_factory=dict)
+    after: dict[Path, str] = field(default_factory=dict)
+    pointers: list[str] = field(default_factory=list)
+    front_matter: list[str] = field(default_factory=list)
+    caps: dict[Path, float] = field(default_factory=dict)
+
+
+def _load(path: Path) -> str | None:
+    """The exact text, line endings included, or None for a missing file."""
+    try:
+        return path.read_bytes().decode("utf-8", errors="surrogateescape")
+    except FileNotFoundError:
+        return None
+
+
+def _temporary(path: Path) -> Path:
+    return path.with_name(f".{path.name}.compact")
+
+
+def _store(path: Path, text: str, unchanged: str | None = None, check: bool = False) -> str:
+    """Writes through a temporary file and returns what it wrote; with `check`, only over the
+    text the plan read."""
+    temporary = _temporary(path)
+    temporary.write_bytes(text.encode("utf-8", errors="surrogateescape"))
+    if check and _digest(_load(path)) != _digest(unchanged):
+        temporary.unlink()
+        raise CompactionError(
+            f"{path} changed during the apply, an agent may be writing to it: every file is "
+            "restored; run compact again when no agent runs"
+        )
+    temporary.replace(path)
+    return text
+
+
+def _digest(text: str | None) -> str | None:
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode("utf-8", errors="surrogateescape")).hexdigest()
+
+
+def _bytes(text: str) -> int:
+    return len(text.encode("utf-8", errors="surrogateescape"))
+
+
+def _bare(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
+def _newline(text: str) -> str:
+    if "\r\n" in text:
+        return "\r\n"
+    return "\n"
+
+
+def _headings(lines: list[str]) -> list[tuple[int, int, str, bool]]:
+    """(line index, level, title, kept) of each heading outside front matter and fenced code.
+
+    A heading is kept when it or the line right below it carries `<!-- keep -->`, or when a
+    heading above it of a higher level is kept.
+    """
+    found: list[tuple[int, int, str, bool]] = []
+    open_levels: list[tuple[int, bool]] = []
+    fence = ""
+    for number in range(_front_matter_end([_bare(line) for line in lines]), len(lines)):
+        bare = _bare(lines[number])
+        if fence:
+            if _closes(bare, fence):
+                fence = ""
+            continue
+        if _opens(bare):
+            fence = _opens(bare)
+            continue
+        match = HEADING.match(bare)
+        if match is None:
+            continue
+        level = len(match[1])
+        while open_levels and open_levels[-1][0] >= level:
+            open_levels.pop()
+        below = "".join(lines[number + 1 : number + 2]).strip()
+        kept = KEEP in bare or below == KEEP or any(kept for _, kept in open_levels)
+        open_levels.append((level, kept))
+        found.append((number, level, match[2].replace(KEEP, "").strip(), kept))
+    return found
+
+
+def movable_sections(lines: list[str], index: bool) -> list[Section]:
+    """Headed sections that may move: none kept inside, no index link in MEMORY.md, and not the
+    one section that spans every heading of the file (its title)."""
+    heads = _headings(lines)
+    found = []
+    for position, (start, level, title, _) in enumerate(heads):
+        ends = [head[0] for head in heads[position + 1 :] if head[1] <= level]
+        end = [*ends, len(lines)][0]
+        inside = [head for head in heads[position:] if head[0] < end]
+        if any(kept for *_, kept in inside) or (position == 0 and end == len(lines)):
+            continue
+        block = lines[start:end]
+        if index and any(INDEX_LINK.match(_bare(line)) for line in block):
+            continue
+        found.append(Section(start, end, title, _bytes("".join(block))))
+    return found
+
+
+def _slug(title: str) -> str:
+    plain = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")[:40].strip("-") or "section"
+
+
+def _links(index_text: str) -> set[str]:
+    return {
+        posixpath.normpath(match[1])
+        for line in _lines(index_text)
+        if INDEX_LINK.match(_bare(line))
+        for match in LINK_TARGET.finditer(_bare(line))
+    }
+
+
+def _lines(text: str) -> list[str]:
+    return LINE.findall(text)
+
+
+def _text(numbered: Numbered) -> str:
+    return "".join(line for _, line in numbered)
+
+
+def _terminated(numbered: Numbered) -> Numbered:
+    """The lines with a line ending on the last one, so that more lines can follow."""
+    if not numbered or numbered[-1][1].endswith("\n"):
+        return numbered
+    number, line = numbered[-1]
+    return [*numbered[:-1], (number, line + _newline(_text(numbered)))]
+
+
+def _with_pointer(numbered: Numbered, pointer: str) -> Numbered:
+    """The index with the pointer after its last index link, or at its end."""
+    links = [at for at, (_, line) in enumerate(numbered) if INDEX_LINK.match(_bare(line))]
+    added = (0, pointer + _newline(_text(numbered)))
+    if not links:
+        return [*_terminated(numbered), added]
+    return [*_terminated(numbered[: links[-1] + 1]), added, *numbered[links[-1] + 1 :]]
+
+
+def _memory_type(text: str) -> str:
+    """`metadata.type` from the front matter, `reference` without one."""
+    lines = _lines(text)
+    head = "".join(lines[: _front_matter_end([_bare(line) for line in lines])])
+    match = MEMORY_TYPE.search(head)
+    if match is None:
+        return "reference"
+    return match[1]
+
+
+class _Planner:
+    """Plans the moves of one agent's memory in memory; nothing is written."""
+
+    def __init__(self, plan: Compaction, directory: Path, settings: Settings) -> None:
+        self.plan, self.directory, self.settings = plan, directory, settings
+        self.index = directory / INDEX
+        self.files: dict[Path, Numbered] = {}
+
+    def lines(self, path: Path) -> Numbered:
+        if path not in self.files:
+            original = _load(path)
+            self.plan.before[path] = original
+            self.files[path] = list(enumerate(_lines(original or ""), 1))
+        return self.files[path]
+
+    def size(self, path: Path) -> int:
+        return _bytes(_text(self.lines(path)))
+
+    def cap(self, path: Path) -> float:
+        if path == self.index:
+            return self.settings.max_index_kb
+        return self.settings.max_file_kb
+
+    def mark(self, path: Path) -> float:
+        return self.settings.warn_ratio * self.cap(path) * 1024
+
+    def note(self, source: Path, text: str) -> None:
+        notes = self.plan.notes.setdefault(source, [])
+        if text not in notes:
+            notes.append(text)
+
+    def relative(self, path: Path) -> str:
+        return path.relative_to(self.directory).as_posix()
+
+    def takes(self, path: Path, title: str, part: Numbered) -> bool:
+        """An existing topic file takes a section of its own title: its first heading is the
+        title, its pointer in MEMORY.md names it, and the section fits under the mark."""
+        heads = _headings([line for _, line in self.lines(path)])
+        if not heads or heads[0][2] != title:
+            return False
+        pointers = [
+            line
+            for _, line in self.lines(self.index)
+            if INDEX_LINK.match(_bare(line)) and self.relative(path) in _links(line)
+        ]
+        if not any(title in line for line in pointers):
+            return False
+        return _bytes(_text([*_terminated(self.lines(path)), *part])) < self.mark(path)
+
+    def target(self, source: Path, title: str, part: Numbered) -> tuple[Path, bool]:
+        """A new `<slug>.md` (`<stem>-<slug>.md` from a topic file), or one of the same title."""
+        base = _slug(title)
+        if source != self.index:
+            base = f"{source.stem}-{base}"
+        for name in [f"{base}.md", *(f"{base}-{number}.md" for number in range(2, 100))]:
+            path = source.parent / name
+            if path == source:
+                continue
+            if path not in self.files and not path.exists():
+                return path, True
+            if self.takes(path, title, part):
+                return path, False
+        raise CompactionError(f"No free topic file name for {title!r} next to {source}")
+
+    def compact(self, source: Path) -> None:
+        """Moves sections until the file is under its mark; when the sections that stay keep
+        it at the mark, nothing moves, unless the file is over its cap: then only until it is
+        under the cap."""
+        before = self.size(source)
+        saved = (dict(self.files), dict(self.plan.before), len(self.plan.moves))
+        saved_added = (len(self.plan.pointers), len(self.plan.front_matter))
+        self.shrink(source, self.mark(source))
+        if self.size(source) >= self.mark(source) and len(self.plan.moves) > saved[2]:
+            self.files, self.plan.before = saved[0], saved[1]
+            del self.plan.moves[saved[2] :]
+            del self.plan.pointers[saved_added[0] :]
+            del self.plan.front_matter[saved_added[1] :]
+            self.note(
+                source,
+                f"left: {self.relative(source)} cannot get under the mark, only kept or refused "
+                "sections remain",
+            )
+            if before > self.cap(source) * 1024:
+                self.shrink(source, math.floor(self.cap(source) * 1024) + 1)
+        after = self.size(source)
+        self.plan.sizes[source] = (before, after, self.cap(source), after >= self.mark(source))
+
+    def shrink(self, source: Path, limit: float) -> None:
+        """Moves the largest section that may move, then the next, while the file is at the
+        limit or past it."""
+        refused: set[int] = set()
+        while self.size(source) >= limit:
+            numbered = self.lines(source)
+            sections = [
+                section
+                for section in movable_sections(
+                    [line for _, line in numbered], source == self.index
+                )
+                if numbered[section.start][0] not in refused
+            ]
+            if not sections:
+                self.note(
+                    source,
+                    "no section left to move: the rest is kept sections, index links, the "
+                    "title section and the lines before the first heading",
+                )
+                return
+            section = max(sections, key=lambda item: (item.size, -item.start))
+            if not self.move(source, section):
+                refused.add(numbered[section.start][0])
+
+    def front(self, source: Path, target: Path, title: str) -> Numbered:
+        """The front matter of a new topic file, in the format of the agents' memory."""
+        text = _text(self.lines(source))
+        description = json.dumps(f"{title}, moved from {self.relative(source)}", ensure_ascii=False)
+        lines = [
+            "---",
+            f"name: {target.stem}",
+            f"description: {description}",
+            "metadata:",
+            f"  type: {_memory_type(text)}",
+            "---",
+        ]
+        return [(0, line + _newline(text)) for line in lines]
+
+    def move(self, source: Path, section: Section) -> bool:
+        numbered = self.lines(source)
+        part = numbered[section.start : section.end]
+        target, new = self.target(source, section.title, part)
+        rest = numbered[: section.start] + numbered[section.end :]
+        index = self.lines(self.index)
+        if source == self.index:
+            index = rest
+        title = section.title.replace("[", "(").replace("]", ")")
+        pointer = f"- [{title}]({self.relative(target)}) — moved from {self.relative(source)}"
+        if new:
+            index = _with_pointer(index, pointer)
+        grown = _bytes(_text(index)) > self.size(self.index)
+        if new and grown and _bytes(_text(index)) > self.cap(self.index) * 1024:
+            self.note(
+                source, f"left: the pointer for {section.title!r} would push {INDEX} over its cap"
+            )
+            return False
+        current = self.front(source, target, section.title)
+        if not new:
+            current = self.lines(target)
+        filled = [*_terminated(current), *part]
+        if _bytes(_text(filled)) > self.cap(target) * 1024:
+            self.note(
+                source,
+                f"left: {section.title!r} is larger than the {self.cap(target):g} KB cap of a "
+                "topic file",
+            )
+            return False
+        self.plan.before.setdefault(target, None)
+        self.files[target] = filled
+        if source != self.index:
+            self.files[source] = rest
+        self.files[self.index] = index
+        if new:
+            self.plan.pointers.append(pointer)
+            self.plan.front_matter += [_bare(line) for _, line in current]
+        block = _text(part)
+        self.plan.moves.append(
+            Move(
+                source,
+                target,
+                section.title,
+                part[0][0],
+                part[-1][0],
+                len(lessons(block)),
+                _bytes(block),
+                new,
+            )
+        )
+        return True
+
+
+def _agents(root: Path, agent: str | None, file: Path | None) -> list[tuple[Path, Path | None]]:
+    if not root.is_dir():
+        raise ValueError(f"No memory directory at {root}")
+    if file is not None:
+        resolved = file.expanduser().resolve()
+        try:
+            parts = resolved.relative_to(root.resolve()).parts
+        except ValueError:
+            raise ValueError(f"{file} is not in an agent directory under {root}") from None
+        if len(parts) < 2 or not resolved.is_file():
+            raise ValueError(f"{file} is not a memory file under {root}")
+        return [(root / parts[0], root.joinpath(*parts))]
+    if agent is not None:
+        if not (root / agent).is_dir():
+            raise ValueError(f"No agent directory {agent} under {root}")
+        return [(root / agent, None)]
+    return [
+        (path, None)
+        for path in sorted(root.iterdir())
+        if path.is_dir() and not path.name.startswith(".")
+    ]
+
+
+def plan_compaction(
+    root: Path, settings: Settings, agent: str | None = None, file: Path | None = None
+) -> Compaction:
+    """Verbatim moves of whole sections out of each file at its warning mark or past it.
+
+    The largest movable section goes first, until the file is under the mark; the lines
+    before the first heading, sections marked `<!-- keep -->` with their subsections and, in
+    MEMORY.md, the sections holding index links stay. A section that cannot move is left and
+    the next one tried. Deterministic: the same files give the same proposal.
+    """
+    plan = Compaction(root)
+    for directory, only in _agents(root, agent, file):
+        planner = _Planner(plan, directory, settings)
+        topics = sorted(
+            path for path in directory.rglob("*.md") if path.is_file() and path.name != INDEX
+        )
+        sources = [path for path in [planner.index, *topics] if path.is_file()]
+        for source in sources:
+            if only is not None and source.resolve() != only.resolve():
+                continue
+            if planner.size(source) >= planner.mark(source):
+                planner.compact(source)
+        for path, numbered in planner.files.items():
+            plan.caps[path] = planner.cap(path)
+            if _text(numbered) != (plan.before[path] or ""):
+                plan.after[path] = _text(numbered)
+    return plan
+
+
+def _kb(size: int, cap_kb: float) -> str:
+    return f"{size / 1024:.1f} KB ({size / (cap_kb * 1024) * 100:.0f} % of {cap_kb:g} KB)"
+
+
+def render_plan(plan: Compaction) -> str:
+    lines = []
+    for source, (before, after, cap_kb, _) in plan.sizes.items():
+        lines.append(
+            f"{source.relative_to(plan.root)}: {_kb(before, cap_kb)} -> {_kb(after, cap_kb)}"
+        )
+        for move in plan.moves:
+            if move.source != source:
+                continue
+            target = move.target.relative_to(_agent_dir(plan, move.source))
+            linked = ""
+            if move.new:
+                linked = " (new, linked from MEMORY.md)"
+            lines.append(
+                f"  move {move.title!r}, lines {move.first}-{move.last}, "
+                f"{_plural(move.lessons, 'lesson')}, {move.size / 1024:.1f} KB, to {target}{linked}"
+            )
+        lines += [f"  {note}" for note in plan.notes.get(source, [])]
+    if not plan.sizes:
+        return "No memory file is at its warning mark.\n"
+    left = sum(1 for *_, stays in plan.sizes.values() if stays)
+    lines.append(
+        f"{_plural(len(plan.moves), 'move')} from {_plural(len(plan.sizes), 'file')}; "
+        f"{_plural(left, 'file')} left at the warning mark."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _agent_dir(plan: Compaction, path: Path) -> Path:
+    return plan.root / path.relative_to(plan.root).parts[0]
+
+
+def _lesson_texts(texts: dict[Path, str]) -> Counter[str]:
+    return Counter(
+        lesson.text for path, text in texts.items() for lesson in lessons(text, path.name == INDEX)
+    )
+
+
+def _line_texts(texts: dict[Path, str]) -> Counter[str]:
+    return Counter(_bare(line) for text in texts.values() for line in _lines(text))
+
+
+def check_moves(plan: Compaction, after: dict[Path, str | None]) -> None:
+    """The files after the moves against the files before them; CompactionError on a failure.
+
+    The lessons are the same, every line is there exactly once and byte for byte (only the
+    pointers and the front matter of new files are new), every moved section stands whole in
+    its target, every new target is linked from MEMORY.md and no file grew over its cap.
+    """
+    old = {path: plan.before.get(path) or "" for path in plan.after}
+    new = {path: after.get(path) or "" for path in plan.after}
+    if _lesson_texts(old) != _lesson_texts(new):
+        raise CompactionError("the lessons are not the same after the move")
+    added = Counter(plan.pointers) + Counter(plan.front_matter)
+    if _line_texts(old) + added != _line_texts(new):
+        raise CompactionError("a line is missing, doubled or changed after the move")
+    for move in plan.moves:
+        moved = _text(_moved_lines(plan, move))
+        if _bare(moved) not in new.get(move.target, ""):
+            raise CompactionError(f"{move.title!r} does not stand whole in {move.target}")
+        directory = _agent_dir(plan, move.target)
+        index = new.get(directory / INDEX)
+        if index is None:
+            index = plan.before.get(directory / INDEX) or ""
+        if move.target.relative_to(directory).as_posix() not in _links(index):
+            raise CompactionError(f"{move.target} is not linked from {INDEX}")
+    for path, text in new.items():
+        if _bytes(text) > plan.caps[path] * 1024 and _bytes(text) > _bytes(old[path]):
+            raise CompactionError(f"{path} would grow over its {plan.caps[path]:g} KB cap")
+
+
+def _moved_lines(plan: Compaction, move: Move) -> Numbered:
+    """The moved lines, as they stood in the source when it was read."""
+    numbered = list(enumerate(_lines(plan.before.get(move.source) or ""), 1))
+    return [(number, line) for number, line in numbered if move.first <= number <= move.last]
+
+
+def _write_order(plan: Compaction) -> list[Path]:
+    """New files and targets first, the sources next, MEMORY.md last: a stop midway leaves a
+    section in two places, never in none."""
+    sources = {move.source for move in plan.moves}
+
+    def rank(path: Path) -> int:
+        if path.name == INDEX:
+            return 3
+        if path in sources:
+            return 2
+        if plan.before.get(path) is None:
+            return 0
+        return 1
+
+    return sorted(plan.after, key=lambda path: (rank(path), str(path)))
+
+
+def apply_plan(plan: Compaction) -> None:
+    """Writes the moves after checking them, reads them back and checks again.
+
+    A file that changed since the proposal stops it before any write, and one that changes
+    during it (an agent writing) before its own rename. Any failure or interruption puts back
+    each file the apply wrote while it still holds what the apply wrote there; a file an agent
+    changed after that is kept and named. A failed write or check comes back as
+    CompactionError, an interruption as itself with the kept files in a note.
+    """
+    for path, text in plan.before.items():
+        if _digest(_load(path)) != _digest(text):
+            raise CompactionError(f"{path} changed since the proposal: run compact again")
+    check_moves(plan, dict(plan.after))
+    written: dict[Path, str] = {}
+    try:
+        for path in _write_order(plan):
+            written[path] = _store(path, plan.after[path], plan.before.get(path), check=True)
+        check_moves(plan, {path: _load(path) for path in plan.after})
+    except BaseException as error:
+        kept = _restore(plan, written)
+        if not isinstance(error, OSError | CompactionError):
+            if kept:
+                error.add_note(_kept(kept))
+            raise
+        reason = str(error)
+        if isinstance(error, OSError):
+            reason = f"a write failed: {error}"
+        raise CompactionError(f"{reason}. {_kept(kept)}") from error
+
+
+def _kept(kept: list[Path]) -> str:
+    if not kept:
+        return "Every file the apply wrote is restored."
+    names = ", ".join(str(path) for path in kept)
+    return (
+        f"The other files are restored; kept as they are, since an agent changed them during "
+        f"the apply: {names}."
+    )
+
+
+def _restore(plan: Compaction, written: dict[Path, str]) -> list[Path]:
+    """Puts back each file the apply wrote while it holds what the apply wrote there, and
+    returns the ones an agent changed after that, which it keeps; a file the apply did not
+    write stays as it is."""
+    kept = []
+    for path in plan.after:
+        _temporary(path).unlink(missing_ok=True)
+        ours = written.get(path, plan.after[path])
+        if _load(path) != ours:
+            if path in written:
+                kept.append(path)
+            continue
+        original = plan.before.get(path)
+        if original is None:
+            path.unlink(missing_ok=True)
+            continue
+        _store(path, original)
+    return kept

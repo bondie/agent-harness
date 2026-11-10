@@ -35,6 +35,7 @@ TRAILER = re.compile(
     r"(?:\s*,\s*expires\s+(?P<expires>\d{4}-\d{2}-\d{2}))?\)[ \t]*$",
     re.M,
 )
+FENCE = re.compile(r"(`{3,}|~{3,})")
 SHOWN_FAILURES = 5
 
 
@@ -58,6 +59,20 @@ def in_own_memory(path: str, agent_type: str) -> bool:
     )
 
 
+def opens(line: str) -> str:
+    """The fence a line opens: a run of three or more backticks or tildes, or nothing."""
+    match = FENCE.match(line)
+    if match is None:
+        return ""
+    return match[1]
+
+
+def closes(line: str, fence: str) -> bool:
+    """A run of the fence's character at least as long as it, with only spaces after."""
+    pattern = f"{re.escape(fence[0])}{{{len(fence)},}}[ \t]*"
+    return re.fullmatch(pattern, line.rstrip("\r\n")) is not None
+
+
 def front_matter_end(lines: list[str]) -> int:
     if not lines or lines[0].strip() != "---":
         return 0
@@ -76,10 +91,11 @@ def lessons(text: str, index: bool = False) -> list[tuple[int, str]]:
     start = front_matter_end(lines)
     for number, line in enumerate(lines[start:], start + 1):
         if fence:
-            fence = "" if line.startswith(fence) else fence
+            if closes(line, fence):
+                fence = ""
             continue
-        if line.startswith(("```", "~~~")):
-            fence, current = line[:3], None
+        if opens(line):
+            fence, current = opens(line), None
             continue
         if current is not None and line.startswith(("  ", "\t")) and line.strip():
             current.append(line.rstrip())

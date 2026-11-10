@@ -492,6 +492,7 @@ cannot be told from growth.
 ```bash
 uv run harness-eval memory lint [--dir ~/.claude/agent-memory]
 uv run harness-eval memory prune --expired [--apply]
+uv run harness-eval memory compact [--agent NAME | --file PATH] [--apply]
 ```
 
 `lint` lists, per agent and file, the undated lessons, the ones without a source, the expired
@@ -506,6 +507,49 @@ approved. It runs the lint when it collects the facts and gives each agent its f
 over the cap, so the proposed moves reach the person with the lessons. It sends the approved
 moves with the approved lines to the same retro run, shows the person any move the hook asked
 that run to propose while it wrote, and runs the lint again for the report.
+
+`compact` proposes verbatim moves for every file at its warning mark or past it: the largest
+section that may move goes first, with its heading and every line under it up to the next
+heading of the same or a higher level, until the file is under the mark; a section that cannot
+move is reported as `left:` and the next one is tried. A section moves out of `MEMORY.md` into
+`<slug>.md` and out of a topic file into `<stem>-<slug>.md` next to it. An existing file takes
+it only when its first heading is the section's title, its pointer in `MEMORY.md` names that
+title and the section fits there under the mark; any other taken name gets `-2`, `-3`, …. A
+new file starts with front matter like the agents' memory (`name` its slug, `description` the
+section title and where it came from, `metadata.type` copied from the source, `reference`
+without one) and gets a pointer after the last index link in `MEMORY.md`:
+`- [Title](file.md) — moved from <source>`. These stay where they are:
+
+- the lines before the first heading (front matter, preamble) and the title section, the one
+  that spans every heading of the file;
+- a section marked `<!-- keep -->`, on its heading line (`## Every run <!-- keep -->`) or on
+  the line right below it, with its subsections;
+- in `MEMORY.md`, a section that holds an index link;
+- a section whose pointer would push `MEMORY.md` over its cap, or that is larger than a topic
+  file's cap;
+- every section of a file that the sections staying there would still hold at the mark: it
+  is reported as `left: … cannot get under the mark`, and when the file is over its cap,
+  sections move only until it is under the cap.
+
+Without `--apply` it only shows the proposal and exits with 0. With `--apply` it checks that no
+file it read changed since then and writes the new files and targets first, the sources next
+and `MEMORY.md` last, each through a temporary file and a rename, so a stop midway leaves a
+section in two places, never in none. Right before each rename it checks that the file is
+still the one it read; a file that an agent changed stops the apply. It reads the files back
+and checks that the lessons are the same, that every line is there exactly once and byte for
+byte (only the pointers and the new front matter are new), that every moved section stands
+whole in its target, that every new topic file is linked from `MEMORY.md` and that no file
+grew over its cap. On any failure or interruption it puts back each file it wrote while
+that file still holds what the apply wrote there; a file an agent changed after that is kept
+and named in the error. It then exits with 1. Do not run `--apply` while agents are running.
+
+A file without `##` sections, a topic file of bullets under one title, has nothing to move. In
+a retro the agent proposes the new `##` headings that split it and the `<!-- keep -->`
+markers, and the person approves them like any line. When the person approves every move
+`compact` proposed for a file, the lead runs `compact --file <path>` again after the agent's
+writes, without `--apply`, and adds `--apply` only when that proposal is exactly the
+approved moves; a difference (a new heading made a section nobody proposed) goes to the
+person first. Otherwise the agent makes the approved moves with Edit or Write.
 
 ## The estimator
 

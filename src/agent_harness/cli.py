@@ -123,6 +123,16 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument("--expired", action="store_true", required=True)
     cmd.add_argument("--apply", action="store_true", help="rewrite the files")
     cmd.set_defaults(handler=_memory_prune)
+    cmd = tasks.add_parser(
+        "compact",
+        help="move whole sections out of files at the warning mark into topic files "
+        "(a proposal without --apply)",
+    )
+    cmd.add_argument("--dir", type=Path, default=default_dir, help="one directory per agent")
+    cmd.add_argument("--agent", help="only this agent's directory under --dir")
+    cmd.add_argument("--file", type=Path, help="only this memory file")
+    cmd.add_argument("--apply", action="store_true", help="make the moves and check them")
+    cmd.set_defaults(handler=_memory_compact)
 
     _team_commands(commands)
     return parser
@@ -461,4 +471,19 @@ def _memory_lint(args: argparse.Namespace) -> int:
 
 def _memory_prune(args: argparse.Namespace) -> int:
     print(memory.prune(args.dir.expanduser(), date.today(), apply=args.apply), end="")
+    return 0
+
+
+def _memory_compact(args: argparse.Namespace) -> int:
+    plan = memory.plan_compaction(
+        args.dir.expanduser(), memory.load_settings(), agent=args.agent, file=args.file
+    )
+    print(memory.render_plan(plan), end="")
+    if not plan.moves:
+        return 0
+    if not args.apply:
+        print("Proposal only: add --apply to make the moves.")
+        return 0
+    memory.apply_plan(plan)
+    print(f"Moved and checked: {len(plan.moves)} sections, lessons and lines unchanged.")
     return 0
