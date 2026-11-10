@@ -1,4 +1,5 @@
 import calendar
+import dataclasses
 import importlib.util
 import itertools
 import json
@@ -147,9 +148,9 @@ def test_lint_lists_each_agent_and_file(tmp_path):
     assert list(results) == ["agent-harness-estimator", "agent-harness-implementer", "empty-agent"]
     assert lines[:7] == [
         "agent-harness-estimator: 1 file, 1 lesson, 0 undated, 0 without a source, 0 expired, "
-        "0 dead paths, 0 files over the cap",
+        "0 dead paths, 0 files over the cap, 0 files near the cap",
         "agent-harness-implementer: 2 files, 8 lessons, 2 undated, 3 without a source, "
-        "1 expired, 1 dead path, 1 file over the cap",
+        "1 expired, 1 dead path, 1 file over the cap, 0 files near the cap",
         "  MEMORY.md: 0.5 KB, over the 0.25 KB cap",
         "    line 8: undated, no source: - An old note without a date",
         "    line 10: expired 2026-02-01: - A lesson that wraps",
@@ -164,9 +165,9 @@ def test_lint_lists_each_agent_and_file(tmp_path):
     assert len(lines[8]) == len(dead) - len("- Rebuild it from scratch; it was in ") + 80
     assert lines[9:] == [
         "empty-agent: 0 files, 0 lessons, 0 undated, 0 without a source, 0 expired, 0 dead paths, "
-        "0 files over the cap",
+        "0 files over the cap, 0 files near the cap",
         "Total, 3 agents: 3 files, 9 lessons, 2 undated, 3 without a source, 1 expired, "
-        "1 dead path, 1 file over the cap",
+        "1 dead path, 1 file over the cap, 0 files near the cap",
     ]
     assert memory.has_findings(results)
 
@@ -189,6 +190,63 @@ def test_a_clean_memory_has_no_findings(tmp_path):
     assert not memory.has_findings(memory.lint(tmp_path, Settings(), TODAY))
 
 
+def sized(path: Path, size: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#" * (size - 1) + "\n")
+    return path
+
+
+def test_lint_marks_the_files_near_the_cap(tmp_path):
+    sized(tmp_path / "agent" / "MEMORY.md", 3482)
+    sized(tmp_path / "agent" / "topic.md", 6553)
+    sized(tmp_path / "agent" / "big.md", 9000)
+    sized(tmp_path / "other" / "MEMORY.md", 3277)
+    settings = Settings()
+
+    results = memory.lint(tmp_path, settings, TODAY)
+    lines = memory.render_lint(results, tmp_path, settings).splitlines()
+
+    assert lines == [
+        "agent: 3 files, 0 lessons, 0 undated, 0 without a source, 0 expired, 0 dead paths, "
+        "1 file over the cap, 1 file near the cap",
+        "  MEMORY.md: 3.4 KB, near the 4 KB cap (85 %)",
+        "  big.md: 8.8 KB, over the 8 KB cap",
+        "other: 1 file, 0 lessons, 0 undated, 0 without a source, 0 expired, 0 dead paths, "
+        "0 files over the cap, 1 file near the cap",
+        "  MEMORY.md: 3.2 KB, near the 4 KB cap (80 %)",
+        "Total, 2 agents: 4 files, 0 lessons, 0 undated, 0 without a source, 0 expired, "
+        "0 dead paths, 1 file over the cap, 2 files near the cap",
+    ]
+
+
+@pytest.mark.parametrize(("ratio", "near"), [(0.8, True), (0.85, True), (0.86, False), (1, False)])
+def test_the_near_mark_comes_from_warn_ratio(tmp_path, ratio, near):
+    sized(tmp_path / "agent" / "MEMORY.md", 3482)
+    settings = Settings(warn_ratio=ratio)
+
+    output = memory.render_lint(memory.lint(tmp_path, settings, TODAY), tmp_path, settings)
+
+    assert ("near the 4 KB cap" in output) is near
+
+
+@pytest.mark.parametrize(("size", "near"), [(4096, True), (4095, False)])
+def test_a_file_exactly_at_the_mark_is_near_the_cap(tmp_path, size, near):
+    sized(tmp_path / "agent" / "topic.md", size)
+    settings = Settings(warn_ratio=0.5)
+
+    output = memory.render_lint(memory.lint(tmp_path, settings, TODAY), tmp_path, settings)
+
+    assert ("topic.md: 4.0 KB, near the 8 KB cap (50 %)" in output) is near
+
+
+def test_a_file_near_the_cap_is_not_a_finding(tmp_path, monkeypatch, capsys):
+    sized(tmp_path / "memory" / "agent" / "MEMORY.md", 3600)
+    monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "harness"))
+
+    assert cli.main(["memory", "lint", "--dir", str(tmp_path / "memory")]) == 0
+    assert "  MEMORY.md: 3.5 KB, near the 4 KB cap (88 %)\n" in capsys.readouterr().out
+
+
 def test_cli_lint(tmp_path, monkeypatch, capsys):
     root = fixture_memory(tmp_path / "agent-memory", tmp_path / "gone")
     home = tmp_path / "harness"
@@ -208,20 +266,39 @@ def test_cli_lint(tmp_path, monkeypatch, capsys):
     assert "No memory directory" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ('{"max_file_kb": 16, "max_index_kb": 2.5, "require_source": false}', (16, 2.5, False)),
-        ('{"max_file_kb": NaN, "max_index_kb": Infinity, "require_source": "no"}', (8, 4, True)),
-        ('{"max_file_kb": -1, "max_index_kb": 0, "require_source": null}', (8, 4, True)),
-        ('{"max_file_kb": "16", "max_index_kb": true}', (8, 4, True)),
-        ("[16]", (8, 4, True)),
-        ("not json", (8, 4, True)),
-    ],
-)
+SETTINGS = [
+    ('{"max_file_kb": 16, "max_index_kb": 2.5, "require_source": false}', (16, 2.5, False, 0.8)),
+    ('{"max_file_kb": NaN, "max_index_kb": Infinity, "require_source": "no"}', (8, 4, True, 0.8)),
+    ('{"max_file_kb": -1, "max_index_kb": 0, "require_source": null}', (8, 4, True, 0.8)),
+    ('{"max_file_kb": "16", "max_index_kb": true}', (8, 4, True, 0.8)),
+    ('{"warn_ratio": 0.5}', (8, 4, True, 0.5)),
+    ('{"warn_ratio": 1}', (8, 4, True, 1)),
+    ('{"warn_ratio": 0}', (8, 4, True, 0.8)),
+    ('{"warn_ratio": -0.5}', (8, 4, True, 0.8)),
+    ('{"warn_ratio": 1.5}', (8, 4, True, 0.8)),
+    ('{"warn_ratio": NaN}', (8, 4, True, 0.8)),
+    ('{"warn_ratio": "0.5"}', (8, 4, True, 0.8)),
+    ('{"warn_ratio": true}', (8, 4, True, 0.8)),
+    ('{"warn_ratio": null}', (8, 4, True, 0.8)),
+    ("[16]", (8, 4, True, 0.8)),
+    ("not json", (8, 4, True, 0.8)),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), SETTINGS)
 def test_settings(tmp_path, text, expected):
     (tmp_path / "memory.json").write_text(text)
     assert memory.load_settings(tmp_path) == Settings(*expected)
+
+
+@pytest.mark.parametrize(("text", "expected"), SETTINGS)
+def test_the_hook_and_the_cli_load_the_same_settings(tmp_path, text, expected):
+    (tmp_path / "memory.json").write_text(text)
+
+    loaded = load_hook().load_settings({"HARNESS_HOME": str(tmp_path)})
+
+    assert loaded._fields == tuple(item.name for item in dataclasses.fields(Settings))
+    assert tuple(loaded) == dataclasses.astuple(memory.load_settings(tmp_path)) == expected
 
 
 def test_settings_default_without_a_file(tmp_path, monkeypatch):

@@ -19,14 +19,16 @@ estimator and measures the team.
   `save_artifacts.py`, `quality_gate.py`, `estimate_check.py` and `memory_cap.py`
   (SubagentStop). The last three also run as PreToolUse on `SubagentHandback`, where auto mode
   delivers a report before the subagent stops; both paths share one block count per run.
-  `memory_cap.py` also runs on SubagentStart, where it records the sizes it measures growth from.
+  `memory_cap.py` also runs on SubagentStart, where it records the sizes it measures growth from,
+  and as PostToolUse on Write and Edit, where it warns once per file and run when a write brings
+  a memory file near its cap (`warn_ratio`).
   Keep them free of third-party imports, they run with the user's `python3`; they may import
   each other, except `estimate_check.py`, which `src/agent_harness/estimate_check.py` copies
   byte for byte.
 - `src/agent_harness/`: the backtest (`harness-eval`), which reads a ticket-precedent index,
   and the team measures (`export-case`, `eval`, `metrics`, `review-finding`, `escaped`), which
   read the ticket artifacts. The hooks cannot import it, so what both need is duplicated and
-  tested to stay in step: `memory.py` (`harness-eval memory`) parses memory lessons like
+  tested to stay in step: `memory.py` (`harness-eval memory`) parses memory lessons and loads `memory.json` like
   `hooks/guard_memory_writes.py` (`tests/test_memory.py`), `artifacts.py` parses report blocks
   like `hooks/save_artifacts.py` (`tests/test_team_cli.py`), and `tests/test_harness_home.py`
   keeps the `HARNESS_HOME` default the same everywhere.

@@ -1,5 +1,5 @@
 {
-  "description": "Run the project's tests after the implementer edits a file and its quality gate when it finishes, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, keep every agent's memory lessons sourced, dated and under a size cap (also for a memory file the run grew through Bash, measured from the sizes at its start and checked when it finishes), deny subagents shell commands that destroy work, leak secrets or touch production and edits to Claude Code settings, the guard's settings, git hooks or installed plugins, stop a subagent that repeats the same call or keeps failing and tell one that has run long to report, log every finished subagent run, keep each agent's report and structured block per ticket, and check the estimator's structured estimate and compute its total; the quality gate, the estimate check and the memory cap check also run when a subagent hands its report back through SubagentHandback.",
+  "description": "Run the project's tests after the implementer edits a file and its quality gate when it finishes, keep subagents from writing to issue trackers, let the read-only agents write only to their memory, keep every agent's memory lessons sourced, dated and under a size cap (also for a memory file the run grew through Bash, measured from the sizes at its start and checked when it finishes, with a warning once per file and run when a write brings one near its cap), deny subagents shell commands that destroy work, leak secrets or touch production and edits to Claude Code settings, the guard's settings, git hooks or installed plugins, stop a subagent that repeats the same call or keeps failing and tell one that has run long to report, log every finished subagent run, keep each agent's report and structured block per ticket, and check the estimator's structured estimate and compute its total; the quality gate, the estimate check and the memory cap check also run when a subagent hands its report back through SubagentHandback.",
   "hooks": {
     "PreToolUse": [
       {
@@ -76,6 +76,11 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/run_tests.py\"",
             "timeout": 600
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/memory_cap.py\"",
+            "timeout": 10
           }
         ]
       },

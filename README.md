@@ -53,7 +53,7 @@ its own marketplace.
 | `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/` (under `$HARNESS_HOME` when set). |
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' Write and Edit calls in their memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). A write through Bash does not pass it. |
-| `hooks/memory_cap.py` | Records the sizes of the four agents' memory files when a run starts or resumes; when the agent stops or hands its report back, sends it back once if the run grew one of them over its size cap, whatever tool wrote it ([Memory hygiene](#memory-hygiene)). |
+| `hooks/memory_cap.py` | Records the sizes of the four agents' memory files when a run starts or resumes; when the agent stops or hands its report back, sends it back once if the run grew one of them over its size cap, whatever tool wrote it. After a Write or Edit that grows one of them to `warn_ratio` (80 %) of its cap, tells the agent once per file and run to move whole lessons verbatim into a topic file, or in a retro run to propose the moves ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database, and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
 | `hooks/guard_runaway.py` | Stops a subagent that repeats the same call or keeps failing, and once tells one that has run long to report ([rules](#runaway-guard)). |
 | `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
@@ -428,14 +428,36 @@ the four agents makes in its own memory directory:
   shrinks an oversized file always passes, so compacting it is never blocked.
 
 The deny reason names each failing line and shows the format. The main session and other
-agents are not checked. The caps and the source requirement live in
-`~/.claude/agent-harness/memory.json` (`$HARNESS_HOME/memory.json` when that is set); a value
-that is not a positive number, or for `require_source` a boolean, falls back to the default.
+agents are not checked. The caps, the source requirement and the warning mark live in
+`~/.claude/agent-harness/memory.json` (`$HARNESS_HOME/memory.json` when that is set); a cap
+that is not a positive number, a `require_source` that is not a boolean and a `warn_ratio`
+that is not a number above 0 and at most 1 fall back to the default.
 With `"require_source": false` a date alone, `(YYYY-MM-DD)`, is enough.
 
 ```json
-{ "max_file_kb": 8, "max_index_kb": 4, "require_source": true }
+{ "max_file_kb": 8, "max_index_kb": 4, "require_source": true, "warn_ratio": 0.8 }
 ```
+
+**The early warning.** The guard stops only a write past the cap, and then the agent compacts
+under pressure in the middle of other work. So `hooks/memory_cap.py` also runs after every
+Write, Edit and MultiEdit (PostToolUse). When the write grew a file in the agent's own memory
+to `warn_ratio` of its cap or past it (by default 80 %: 3.2 KB of `MEMORY.md`, 6.4 KB of a
+topic file), the agent gets context with the file, its size, its cap and the share, and the
+next step under one rule. A verbatim move, whole lessons with the same wording and the same
+`(source: …)` into a topic file linked from `MEMORY.md`, is not a compaction: outside a retro
+the agent makes it itself and lists the moved lines in its report; in a retro run it proposes
+the move in its report, with the lines and the target file, for the person to approve.
+Rewording, merging or deleting a lesson always goes through the person. When moving every
+lesson out would still leave the file at the mark (an index of pointer lines), the agent is
+asked instead to propose merging topics into fewer files or shortening the pointer hooks, for
+the person to approve.
+
+A write grows a file when it leaves it larger than the `originalFile` Claude Code reports for
+Write and Edit. Without one, an edit grows it when its new strings are longer than its old
+ones, and a Write when it creates the file or leaves it larger than at the run's recorded
+start; without a recorded start every Write counts. The warning comes once per file per run:
+the run's state in `$HARNESS_HOME/memory-cap/` records it, and the next start clears it. It
+adds context and blocks nothing.
 
 **The cap at the end of a run.** A write through Bash (`cat >>`, `sed -i`, a script) never
 reaches the guard, so `hooks/memory_cap.py` checks the files themselves. When one of the four
@@ -473,13 +495,17 @@ uv run harness-eval memory prune --expired [--apply]
 ```
 
 `lint` lists, per agent and file, the undated lessons, the ones without a source, the expired
-ones, dead paths and the files over the cap, and exits with 1 when it finds any. A dead path is
-an absolute path in a lesson that does not exist although its top directory does; URL paths
+ones, dead paths, the files over the cap and the files near it (at `warn_ratio` of the cap or
+past it, with the share), and exits with 1 when it finds any of them but a file near the cap.
+A dead path is an absolute path in a lesson that does not exist although its top directory does; URL paths
 and a container's `/app/…` are skipped that way, a container path under `/usr` or `/tmp` is
 not. Of `host:container` (a volume mapping, `file:42`) only the host side is checked, and a path
 right after a placeholder (`/opt/<v>/bin`) is not checked. `prune --expired` removes the lessons whose expiry date has come, with their continuation
 lines; without `--apply` it only lists them. The `retro` skill writes only the lines the person
-approved and suggests the lint every few retros.
+approved. It runs the lint when it collects the facts and gives each agent its files near or
+over the cap, so the proposed moves reach the person with the lessons. It sends the approved
+moves with the approved lines to the same retro run, shows the person any move the hook asked
+that run to propose while it wrote, and runs the lint again for the report.
 
 ## The estimator
 

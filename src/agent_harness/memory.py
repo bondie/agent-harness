@@ -42,6 +42,7 @@ class Settings:
     max_file_kb: float = 8
     max_index_kb: float = 4
     require_source: bool = True
+    warn_ratio: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -91,16 +92,30 @@ class FileReport:
     cap_kb: float
     lessons: int
     issues: list[tuple[Lesson, list[str]]] = field(default_factory=list)
+    warn_ratio: float = Settings.warn_ratio
 
     @property
     def over_cap(self) -> bool:
         return self.size > self.cap_kb * 1024
+
+    @property
+    def near_cap(self) -> bool:
+        """At `warn_ratio` of the cap or past it, and not over it."""
+        return not self.over_cap and self.size >= self.warn_ratio * self.cap_kb * 1024
 
 
 def _size_kb(value: Any, default: float) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return default
     if not math.isfinite(value) or value <= 0:
+        return default
+    return float(value)
+
+
+def _ratio(value: Any, default: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return default
+    if not math.isfinite(value) or not 0 < value <= 1:
         return default
     return float(value)
 
@@ -119,6 +134,7 @@ def load_settings(home: Path | None = None) -> Settings:
         _size_kb(raw.get("max_file_kb"), defaults.max_file_kb),
         _size_kb(raw.get("max_index_kb"), defaults.max_index_kb),
         require_source if isinstance(require_source, bool) else defaults.require_source,
+        _ratio(raw.get("warn_ratio"), defaults.warn_ratio),
     )
 
 
@@ -235,6 +251,7 @@ def lint_file(path: Path, settings: Settings, today: date) -> FileReport:
         len(text.encode("utf-8", errors="surrogateescape")),
         settings.max_index_kb if index else settings.max_file_kb,
         len(found),
+        warn_ratio=settings.warn_ratio,
     )
     for lesson in found:
         issues = []
@@ -287,8 +304,18 @@ def _summary(reports: list[FileReport], require_source: bool) -> str:
         f"{_count(reports, 'expired')} expired",
         _plural(_count(reports, "dead path"), "dead path"),
         _plural(sum(report.over_cap for report in reports), "file") + " over the cap",
+        _plural(sum(report.near_cap for report in reports), "file") + " near the cap",
     ]
     return ", ".join(parts)
+
+
+def _cap_note(report: FileReport) -> str:
+    if report.over_cap:
+        return f", over the {report.cap_kb:g} KB cap"
+    if not report.near_cap:
+        return ""
+    share = report.size / (report.cap_kb * 1024) * 100
+    return f", near the {report.cap_kb:g} KB cap ({share:.0f} %)"
 
 
 def _excerpt(lesson: Lesson) -> str:
@@ -301,11 +328,10 @@ def render_lint(results: dict[str, list[FileReport]], root: Path, settings: Sett
     for agent, reports in results.items():
         lines.append(f"{agent}: {_summary(reports, settings.require_source)}")
         for report in reports:
-            if not report.issues and not report.over_cap:
+            if not report.issues and not report.over_cap and not report.near_cap:
                 continue
-            cap = f", over the {report.cap_kb:g} KB cap" if report.over_cap else ""
             name = report.path.relative_to(root / agent)
-            lines.append(f"  {name}: {report.size / 1024:.1f} KB{cap}")
+            lines.append(f"  {name}: {report.size / 1024:.1f} KB{_cap_note(report)}")
             lines += [
                 f"    line {lesson.first}: {', '.join(issues)}: {_excerpt(lesson)}"
                 for lesson, issues in report.issues

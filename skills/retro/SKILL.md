@@ -42,15 +42,21 @@ and say so in the report.
   the worklogs> --repo <paths>`. Add `--actual-part implementation=…` (or `verification`,
   `release`) only for a part whose time was measured, with `--source measured` when all of
   it was; never split the logged total into parts by guess.
+- The memory size: `harness-eval memory lint` (README, "Memory hygiene") lists per agent the
+  files near the cap (at `warn_ratio` of it, 80 % by default) and over it, with the share.
 
 ## 2. Have each agent propose its lessons
 
 Run the agents in parallel, each with a task that starts with `Retro for <KEY>`: "Retro for
 <KEY>. Do not write to your memory yet, and end without a structured block. From the
 following, propose the lines to add, each as `- <lesson> (source: <KEY>, <today>[, expires
-YYYY-MM-DD])`, and the existing lines to change or delete." The plugin's hooks recognise a
-retro run by that start and do not ask it for a block. Use `retro` as the source for a
-lesson that outgrows the ticket, and an expiry for one tied to a version, release or incident.
+YYYY-MM-DD])`, and the existing lines to change or delete. For each memory file listed below
+as near or over its cap, also propose verbatim moves: which whole lessons, wording and source
+unchanged, go into which topic file linked from MEMORY.md, and the pointer line MEMORY.md
+needs; when its lessons cannot bring it under the mark, propose merging topics or shortening
+pointers." The plugin's hooks recognise a retro run by that start and do not ask it for a
+block. Use `retro` as the source for a lesson that outgrows the ticket, and an expiry for one
+tied to a version, release or incident.
 Send each only what concerns it, and skip an agent with nothing new:
 
 - **estimator:** a calibration row (repositories, files, lines with tests, the person's
@@ -58,22 +64,34 @@ Send each only what concerns it, and skip an agent with nothing new:
 - **jira-analyst:** what the plan missed or overplanned, and traps found in the codebase.
 - **implementer:** where the time went and the commands or conventions that would have saved it.
 - **reviewer-qa:** the findings the person rejected and why, and defects that got through.
+- **every agent with a file near or over its cap:** those files from the lint in step 1, each
+  with its size, its cap and the warning mark (`warn_ratio`), so the moves land in the list of
+  step 3.
 
 ## 3. Let the person decide
 
-Show the proposed lines per agent, numbered, to approve, edit or reject each. Nothing goes
-into memory before that: a wrong lesson misleads every later run, and a remembered rejection
-can hide the next real finding.
+Show the proposed lines and moves per agent, numbered, to approve, edit or reject each.
+Nothing goes into memory before that: a wrong lesson misleads every later run, and a
+remembered rejection can hide the next real finding.
 
 ## 4. Write the approved lines
 
-Send each agent with approved lines: "Write these approved lines to your memory exactly as
-given, and make these approved changes and deletions: …". A hook denies a line without source
-and date and a file over its size cap; a compaction goes through the person like any line.
+Send each agent with approved lines or moves, in its retro run from step 2 (SendMessage to that
+agent): "Write these approved lines to your memory exactly as given, make these approved
+verbatim moves, and make these approved changes and deletions: …". If you start a new run
+instead, begin its task with `Retro for <KEY>` too, so the hooks treat it as a retro. A hook
+denies a line without source and date and a file over its size cap. A verbatim move, whole
+lessons with the same wording and the same `(source: …)` into a topic file linked from
+`MEMORY.md`, is not a compaction: outside a retro the agent makes it itself and lists the moved
+lines in its report; in a retro run it proposes the move in its report, with the lines and the
+target file, for the person to approve. Rewording, merging or deleting a lesson always goes
+through the person.
 
 ## 5. Report
 
 Show the estimate against the actual time, the biggest lesson per agent and the lines
-written. Every few retros, run `harness-eval memory lint` (README, "Memory hygiene"; run it
-as in step 1). A retro
-stays local: never write it to the tracker unless the person asks for it.
+written. When the hook asked an agent to propose a move while it wrote in step 4, its report
+holds the proposal: show it to the person, numbered as in step 3, and send the approved moves
+as in step 4. After every retro, run `harness-eval memory lint` again, as in step 1, and show
+the files still near or over the cap. A retro stays local: never write it to the tracker unless
+the person asks for it.
