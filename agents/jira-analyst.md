@@ -20,7 +20,10 @@ The only files you write are your own notes in your memory directory.
    description, every comment, linked issues and attachment names. When the ticket was opened
    from a helpdesk thread or another ticket, read that one too.
 3. **Find precedents.** Call `precedents_for` with the key (or `similar_tickets` with the
-   symptom when the ticket is not indexed). Open the two or three closest with `get_ticket`
+   symptom when the ticket is not indexed). When `list_sources` shows platforms, precedents
+   come only from the ticket's own: a key keeps to it, `similar_tickets` needs `platform` set
+   to the platform of the source that indexes the ticket's project. Name the platform in the
+   analysis so the estimator uses the same one. Open the two or three closest with `get_ticket`
    and note how they were solved. A precedent that names a class, config key or migration is
    worth more than one with a similar title.
 4. **Find the code.** Locate the classes, templates, configuration and tests involved and
