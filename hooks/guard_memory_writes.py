@@ -42,6 +42,7 @@ class Settings(NamedTuple):
     max_file_kb: float = 8
     max_index_kb: float = 4
     require_source: bool = True
+    warn_ratio: float = 0.8
 
 
 def memory_dir_name(agent_type: str) -> str:
@@ -123,6 +124,14 @@ def size_kb(value: Any, default: float) -> float:
     return float(value)
 
 
+def ratio(value: Any, default: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return default
+    if not math.isfinite(value) or not 0 < value <= 1:
+        return default
+    return float(value)
+
+
 def harness_home(environ: dict[str, str]) -> Path:
     custom = environ.get("HARNESS_HOME", "").strip()
     if custom:
@@ -143,6 +152,7 @@ def load_settings(environ: dict[str, str]) -> Settings:
         size_kb(raw.get("max_file_kb"), defaults.max_file_kb),
         size_kb(raw.get("max_index_kb"), defaults.max_index_kb),
         require_source if isinstance(require_source, bool) else defaults.require_source,
+        ratio(raw.get("warn_ratio"), defaults.warn_ratio),
     )
 
 

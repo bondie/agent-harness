@@ -629,5 +629,373 @@ def test_hooks_json_runs_the_check_at_the_start_the_stop_and_the_handback():
         ("SubagentStart", None),
         ("SubagentStop", None),
         ("PreToolUse", "SubagentHandback"),
+        ("PostToolUse", "Edit|Write|MultiEdit"),
     ):
         assert any("hooks/memory_cap.py" in command for command in scripts(event, matcher))
+
+
+GROWING_EDIT = {"old_string": "x", "new_string": "x\n- A lesson (source: SHOP-412, 2026-01-15)"}
+
+
+def written(
+    path: Path,
+    tool: str = "Edit",
+    agent: Any = AGENT,
+    write_type: str = "update",
+    cwd: str = "/work/shop",
+    original: str | None = None,
+    session: str = "/work/session.jsonl",
+    **tool_input: Any,
+) -> dict[str, Any]:
+    response = {"filePath": str(path), "type": write_type}
+    if original is not None:
+        response["originalFile"] = original
+    return {
+        "hook_event_name": "PostToolUse",
+        "tool_name": tool,
+        "tool_input": {"file_path": str(path), **(tool_input or GROWING_EDIT)},
+        "tool_response": response,
+        "session_id": "s1",
+        "agent_id": "a1",
+        "agent_type": agent,
+        "cwd": cwd,
+        "transcript_path": session,
+    }
+
+
+LESSON = "- Run the specs with make spec (source: SHOP-412, 2026-01-15)\n"
+LINK = "- [Commands](commands.md) — how to run the tests\n"
+
+
+def noted(path: Path, kb: float, line: str = LESSON, head: str = "") -> Path:
+    size = int(kb * 1024)
+    body = head + line * ((size - len(head.encode())) // len(line.encode()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body + "\n" * (size - len(body.encode())))
+    return path
+
+
+def context(verdict: dict[str, Any] | None) -> str:
+    assert verdict is not None
+    assert list(verdict) == ["hookSpecificOutput"]
+    output = verdict["hookSpecificOutput"]
+    assert list(output) == ["hookEventName", "additionalContext"]
+    assert output["hookEventName"] == "PostToolUse"
+    return str(output["additionalContext"])
+
+
+@pytest.mark.parametrize(("name", "kb"), [("commands.md", 6), ("MEMORY.md", 3), ("t/a.md", 6.3)])
+def test_a_write_under_the_warning_mark_adds_nothing(tmp_path, cap, name, kb):
+    path = grow(memory(tmp_path) / name, kb)
+
+    assert cap.decision(written(path), env(tmp_path)) is None
+    assert not state(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "kb", "shown", "into"),
+    [
+        ("commands.md", 7, "is at 7.0 KB of its 8 KB cap (88 %)", "another topic file"),
+        ("MEMORY.md", 3.5, "is at 3.5 KB of its 4 KB cap (88 %)", "a topic file"),
+        ("topics/commands.md", 6.5, "is at 6.5 KB of its 8 KB cap (81 %)", "another topic file"),
+    ],
+)
+def test_a_write_past_the_warning_mark_tells_the_agent_once(tmp_path, cap, name, kb, shown, into):
+    path = noted(memory(tmp_path) / name, kb)
+
+    text = context(cap.decision(written(path), env(tmp_path)))
+    again = cap.decision(written(path), env(tmp_path))
+
+    assert text == (
+        f"agent-harness: {path} {shown}, past the 80 % warning mark. In this same run, move whole "
+        f"lessons verbatim, with the same wording and the same `(source: …)`, into {into} linked "
+        "from MEMORY.md, keeping one pointer line per topic in MEMORY.md, and list the moved "
+        "lines in your report. A verbatim move is not a compaction and needs no approval. "
+        "Rewording, merging or deleting a lesson always goes through the person."
+    )
+    assert again is None
+
+
+@pytest.mark.parametrize(
+    ("task_text", "retro"),
+    [
+        ("Retro for SHOP-412. Do not write to your memory yet.", True),
+        ("SHOP-412: Retro for SHOP-412.", True),
+        ("SHOP-412: implement it", False),
+    ],
+)
+def test_a_retro_run_is_asked_to_propose_the_moves(tmp_path, cap, task_text, retro):
+    path = noted(memory(tmp_path) / "MEMORY.md", 3.5)
+    transcript(tmp_path, [prompt(task_text, 5, "p1")])
+
+    event = written(path, session=str(tmp_path / "session.jsonl"))
+    text = context(cap.decision(event, env(tmp_path)))
+
+    proposal = (
+        "This is a retro run: propose verbatim moves of whole lessons in your report, with the "
+        "lines and the target topic file linked from MEMORY.md, for the person to approve; do "
+        "not make a move yourself that the person has not approved. Rewording, merging or "
+        "deleting a lesson always goes through the person."
+    )
+    assert (proposal in text) is retro
+    assert ("In this same run, move whole lessons verbatim" in text) is not retro
+
+
+@pytest.mark.parametrize(
+    ("name", "kb", "content"),
+    [
+        ("MEMORY.md", 3.5, {"line": LINK}),
+        ("MEMORY.md", 3.5, {"line": LINK, "head": LESSON}),
+        ("commands.md", 7, {"line": "Prose that is not a lesson.\n"}),
+    ],
+)
+@pytest.mark.parametrize("retro", [True, False])
+def test_a_file_its_lessons_cannot_bring_under_the_mark_asks_for_fewer_topics(
+    tmp_path, cap, name, kb, content, retro
+):
+    path = noted(memory(tmp_path) / name, kb, **content)
+    task_text = "SHOP-412: implement it"
+    if retro:
+        task_text = "Retro for SHOP-412."
+    transcript(tmp_path, [prompt(task_text, 5, "p1")])
+
+    event = written(path, session=str(tmp_path / "session.jsonl"))
+    text = context(cap.decision(event, env(tmp_path)))
+
+    assert text.endswith(
+        "past the 80 % warning mark. Moving its lessons out would not bring it under the mark: "
+        "the rest is pointer lines and other text that is not a lesson. Propose in your report "
+        "merging topics into fewer files or shortening the pointer hooks, for the person to "
+        "approve; do not make those changes yourself. Rewording, merging or deleting a lesson "
+        "always goes through the person."
+    )
+    assert "move whole lessons" not in text
+    assert "verbatim moves" not in text
+
+
+def test_lessons_that_bring_an_index_under_the_mark_are_moved(tmp_path, cap):
+    path = noted(memory(tmp_path) / "MEMORY.md", 3.5, head=LINK * 20)
+
+    text = context(cap.decision(written(path), env(tmp_path)))
+
+    assert "In this same run, move whole lessons verbatim" in text
+
+
+@pytest.mark.parametrize(("rest", "can_move"), [(4096, False), (4095, True)])
+def test_the_lessons_must_bring_the_file_under_the_mark(tmp_path, cap, rest, can_move):
+    path = memory(tmp_path) / "commands.md"
+    path.write_text("#" * (rest - 1) + "\n" + LESSON * 10)
+    config = tmp_path / "harness" / "memory.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"warn_ratio": 0.5}))
+
+    text = context(cap.decision(written(path), env(tmp_path)))
+
+    assert ("In this same run, move whole lessons verbatim" in text) is can_move
+    assert ("Moving its lessons out would not bring it under the mark" in text) is not can_move
+
+
+def test_another_file_gets_its_own_warning(tmp_path, cap):
+    commands = grow(memory(tmp_path) / "commands.md", 7)
+    index = grow(memory(tmp_path) / "MEMORY.md", 3.5)
+
+    first = context(cap.decision(written(commands), env(tmp_path)))
+    second = context(cap.decision(written(index), env(tmp_path)))
+
+    assert str(commands) in first
+    assert str(index) in second
+    assert cap.decision(written(commands), env(tmp_path)) is None
+    assert cap.decision(written(index), env(tmp_path)) is None
+
+
+def test_a_new_run_is_warned_again_and_keeps_the_start_record(tmp_path, cap):
+    path = grow(memory(tmp_path) / "commands.md", 7)
+    begin(cap, tmp_path)
+    context(cap.decision(written(path), env(tmp_path)))
+
+    recorded = json.loads(state(tmp_path).read_text())
+    begin(cap, tmp_path)
+
+    assert recorded == {
+        "baseline": {"commands.md": 7168},
+        "started": cap.time.now,
+        "warned": [str(path)],
+    }
+    context(cap.decision(written(path), env(tmp_path)))
+
+
+SHRINKING_EDIT = {"old_string": "xx", "new_string": "x"}
+CONTENT = {"content": "x"}
+
+
+@pytest.mark.parametrize(
+    ("tool", "start_kb", "write_type", "tool_input", "warned"),
+    [
+        ("Edit", 1, "update", GROWING_EDIT, True),
+        ("Edit", 1, "update", SHRINKING_EDIT, False),
+        ("Edit", 1, "update", {**SHRINKING_EDIT, "replace_all": True}, False),
+        ("Edit", 1, "update", {"old_string": "x", "new_string": "y"}, False),
+        ("MultiEdit", 1, "update", {"edits": [GROWING_EDIT, SHRINKING_EDIT]}, True),
+        ("MultiEdit", 1, "update", {"edits": [SHRINKING_EDIT, SHRINKING_EDIT]}, False),
+        ("MultiEdit", 1, "update", {"edits": "x"}, False),
+        ("Edit", 1, "update", {"old_string": "abc", "new_string": "čř"}, True),
+        ("Edit", 1, "update", {"old_string": "čř", "new_string": "abc"}, False),
+        ("Write", 7.5, "update", CONTENT, False),
+        ("Write", 7, "update", CONTENT, False),
+        ("Write", 6.5, "update", CONTENT, True),
+        ("Write", None, "update", CONTENT, True),
+        ("Write", 7.5, "create", CONTENT, True),
+    ],
+)
+def test_only_a_write_that_grew_the_file_is_warned_about(
+    tmp_path, cap, tool, start_kb, write_type, tool_input, warned
+):
+    path = memory(tmp_path) / "commands.md"
+    if start_kb is not None:
+        grow(path, start_kb)
+        begin(cap, tmp_path)
+    grow(path, 7)
+
+    verdict = cap.decision(written(path, tool, write_type=write_type, **tool_input), env(tmp_path))
+
+    assert (verdict is not None) is warned
+    if not warned:
+        context(cap.decision(written(path), env(tmp_path)))
+
+
+REMOVE_ALL = {"old_string": "x", "new_string": "", "replace_all": True}
+
+
+@pytest.mark.parametrize(
+    ("tool", "start_kb", "before_kb", "tool_input", "warned"),
+    [
+        ("Write", 7.5, 6, CONTENT, True),
+        ("Write", 6.5, 7.8, CONTENT, False),
+        ("MultiEdit", 1, 7.8, {"edits": [REMOVE_ALL, GROWING_EDIT]}, False),
+        ("Edit", 1, 7, GROWING_EDIT, False),
+        ("Edit", 1, 6.9, SHRINKING_EDIT, True),
+    ],
+)
+def test_the_size_right_before_the_write_decides_when_the_tool_reports_it(
+    tmp_path, cap, tool, start_kb, before_kb, tool_input, warned
+):
+    path = grow(memory(tmp_path) / "commands.md", start_kb)
+    begin(cap, tmp_path)
+    grow(path, 7)
+    original = "x" * int(before_kb * 1024)
+
+    verdict = cap.decision(written(path, tool, original=original, **tool_input), env(tmp_path))
+
+    assert (verdict is not None) is warned
+
+
+def test_the_original_file_counts_in_bytes(tmp_path, cap):
+    path = grow(memory(tmp_path) / "commands.md", 7)
+
+    verdict = cap.decision(written(path, original="č" * 3584 + "x"), env(tmp_path))
+
+    assert verdict is None
+
+
+@pytest.mark.parametrize(
+    ("agent", "directory"),
+    [
+        (AGENT, "agent-harness-reviewer-qa"),
+        (AGENT, "agent-harness-implementer-old"),
+        ("Explore", "Explore"),
+        ("general-purpose", OWN),
+        (None, OWN),
+    ],
+)
+def test_other_agents_and_directories_get_no_warning(tmp_path, cap, agent, directory):
+    path = grow(memory(tmp_path, directory) / "commands.md", 7)
+
+    assert cap.decision(written(path, agent=agent), env(tmp_path)) is None
+
+
+def test_a_file_outside_the_memory_gets_no_warning(tmp_path, cap):
+    path = grow(tmp_path / "work" / "shop" / "MEMORY.md", 7)
+
+    assert cap.decision(written(path), env(tmp_path)) is None
+
+
+@pytest.mark.parametrize("tool", ["Read", "NotebookEdit", "Bash"])
+def test_other_tools_get_no_warning(tmp_path, cap, tool):
+    path = grow(memory(tmp_path) / "commands.md", 7)
+
+    assert cap.decision(written(path, tool), env(tmp_path)) is None
+
+
+def test_a_relative_path_is_read_from_the_cwd(tmp_path, cap):
+    path = grow(memory(tmp_path) / "commands.md", 7)
+
+    verdict = cap.decision(written(Path("commands.md"), cwd=str(path.parent)), env(tmp_path))
+
+    assert f"agent-harness: {path} is at 7.0 KB" in context(verdict)
+
+
+@pytest.mark.parametrize(
+    ("settings", "kb", "warned"),
+    [
+        ({"warn_ratio": 0.5}, 4.5, True),
+        ({"warn_ratio": 0.5}, 4, True),
+        ({"warn_ratio": 0.5}, 4095 / 1024, False),
+        ({"warn_ratio": 0.5}, 3.5, False),
+        ({"warn_ratio": 0.95}, 7, False),
+        ({"warn_ratio": 0.95}, 7.8, True),
+        ({"warn_ratio": 1}, 7.9, False),
+        ({"max_file_kb": 16}, 7, False),
+        ({"max_file_kb": 16, "warn_ratio": 0.4}, 7, True),
+    ],
+)
+def test_the_warning_mark_comes_from_memory_json(tmp_path, cap, settings, kb, warned):
+    path = grow(memory(tmp_path) / "commands.md", kb)
+    config = tmp_path / "harness" / "memory.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps(settings))
+
+    assert (cap.decision(written(path), env(tmp_path)) is not None) is warned
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"warn_ratio": 0}',
+        '{"warn_ratio": -0.5}',
+        '{"warn_ratio": 1.5}',
+        '{"warn_ratio": NaN}',
+        '{"warn_ratio": Infinity}',
+        '{"warn_ratio": "0.5"}',
+        '{"warn_ratio": true}',
+        '{"warn_ratio": null}',
+        "not json",
+    ],
+)
+def test_an_unusable_warn_ratio_falls_back_to_the_default(tmp_path, cap, text):
+    under = grow(memory(tmp_path) / "under.md", 6.3)
+    over = grow(memory(tmp_path) / "over.md", 6.5)
+    config = tmp_path / "harness" / "memory.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(text)
+
+    assert cap.decision(written(under), env(tmp_path)) is None
+    assert "past the 80 % warning mark" in context(cap.decision(written(over), env(tmp_path)))
+
+
+def test_an_unwritable_harness_home_warns_on_every_write(tmp_path, cap):
+    path = grow(memory(tmp_path) / "commands.md", 7)
+    (tmp_path / "harness").write_text("a file, not a directory")
+
+    for _ in range(2):
+        assert str(path) in context(cap.decision(written(path), env(tmp_path)))
+
+
+def test_the_script_warns_once_after_a_write(tmp_path):
+    path = grow(memory(tmp_path) / "commands.md", 7)
+
+    first = run_hook(tmp_path, json.dumps(written(path)))
+    second = run_hook(tmp_path, json.dumps(written(path)))
+
+    assert (first.returncode, first.stderr) == (0, "")
+    assert str(path) in context(json.loads(first.stdout))
+    assert (second.returncode, second.stdout, second.stderr) == (0, "", "")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SubagentStart, SubagentStop and SubagentHandback hook: memory a run grew over its cap.
+"""SubagentStart, SubagentStop, SubagentHandback and PostToolUse hook: memory near or over its cap.
 
 `guard_memory_writes.py` caps Write and Edit in an agent's own memory, but a write through Bash
 (`cat >>`, `sed -i`, a script) never reaches it. So for the four team agents this hook records,
@@ -20,8 +20,18 @@ After the block the hook lets the agent stop and warns the person; the count sta
 next start. In auto mode the agent delivers its report through SubagentHandback before it
 stops, so the same check runs as a PreToolUse hook on that tool and denies the call; both paths
 share the count. Retro runs are checked too: they write memory. When the hook cannot record its
-count, it lets the agent through and says so. Standard library only, and an internal error
-never blocks.
+count, it lets the agent through and says so.
+
+As a PostToolUse hook on Write, Edit and MultiEdit it warns early: when a write grows a file in
+the agent's own memory to `warn_ratio` (0.8) of its cap or past it, the agent gets context that
+asks it to move whole lessons verbatim into a topic file in this same run; a retro run is asked
+to propose the moves for the person to approve instead, and a file whose lessons cannot bring
+it under the mark (an index of pointers) to propose fewer topics or shorter pointers. A write
+grows the file when it leaves it larger than the tool's `originalFile`; without that, an edit
+grows it when its new strings are longer than its old ones, a Write when it creates the file or
+leaves it larger than at the recorded start. The warning comes once per file per run: the run's
+state records it, and the next start replaces that state. Standard library only, and an
+internal error never blocks.
 """
 
 from __future__ import annotations
@@ -33,15 +43,25 @@ import stat
 import sys
 import time
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, NamedTuple, TextIO
 
-from guard_memory_writes import INDEX, TEAM, load_settings, memory_dir_name
+from guard_memory_writes import (
+    INDEX,
+    TEAM,
+    in_own_memory,
+    lessons,
+    load_settings,
+    memory_dir_name,
+    replacements,
+)
 from log_agent_runs import parse_time
 from save_artifacts import (
     HANDBACK,
     agent_transcript,
     harness_home,
+    is_retro,
+    locked,
     read_transcript,
     run_started,
     write_json,
@@ -64,6 +84,13 @@ class Checked(NamedTuple):
     key: str
     started: float
     calls: list[dict[str, Any]]
+
+
+class Near(NamedTuple):
+    path: Path
+    size: int
+    cap_kb: float
+    ratio: float
 
 
 def team_agent(event: Mapping[str, Any]) -> str | None:
@@ -330,10 +357,158 @@ def deny(text: str) -> dict[str, Any]:
     }
 
 
+def written_memory(event: Mapping[str, Any], agent_type: str) -> Path | None:
+    """The file in the agent's own memory that the Write or Edit wrote."""
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict) or not isinstance(tool_input.get("file_path"), str):
+        return None
+    target = str(tool_input["file_path"])
+    if target and not PurePath(target).is_absolute():
+        target = str(PurePath(str(event.get("cwd") or "")) / target)
+    if not target or not in_own_memory(target, agent_type):
+        return None
+    return Path(os.path.normpath(target))
+
+
+def near_cap(event: Mapping[str, Any], environ: Mapping[str, str]) -> Near | None:
+    """A file in the agent's own memory the write left at its warning mark or past it."""
+    agent_type = team_agent(event)
+    if agent_type is None or event.get("tool_name") not in WRITES:
+        return None
+    path = written_memory(event, agent_type)
+    if path is None:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    settings = load_settings(dict(environ))
+    cap_kb = settings.max_file_kb
+    if path.name == INDEX:
+        cap_kb = settings.max_index_kb
+    if size < settings.warn_ratio * cap_kb * 1024:
+        return None
+    return Near(path, size, cap_kb, settings.warn_ratio)
+
+
+def byte_size(text: str) -> int:
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
+def start_size(path: Path, agent_type: str, baseline: Any) -> int | None:
+    directory = memory_dir(agent_type)
+    if not isinstance(baseline, dict) or not path.is_relative_to(directory):
+        return None
+    before = baseline.get(path.relative_to(directory).as_posix())
+    if isinstance(before, bool) or not isinstance(before, int):
+        return None
+    return before
+
+
+def grew(event: Mapping[str, Any], found: Near, baseline: Any) -> bool:
+    """Against the file right before the write when the tool reports it, otherwise by the write."""
+    response = event.get("tool_response")
+    if not isinstance(response, dict):
+        response = {}
+    original = response.get("originalFile")
+    if isinstance(original, str):
+        return found.size > byte_size(original)
+    tool = str(event.get("tool_name"))
+    if tool != "Write":
+        edits = replacements(tool, dict(event.get("tool_input") or {}))
+        return sum(byte_size(new) - byte_size(old) for old, new, _ in edits) > 0
+    if response.get("type") == "create":
+        return True
+    before = start_size(found.path, str(event.get("agent_type")), baseline)
+    return before is None or found.size > before
+
+
+def movable(found: Near) -> bool:
+    """Whether moving all of its lessons out would bring the file under its warning mark."""
+    try:
+        text = found.path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    moved = sum(byte_size(lesson) + 1 for _, lesson in lessons(text, found.path.name == INDEX))
+    return found.size - moved < found.ratio * found.cap_kb * 1024
+
+
+def mark_warned(path: Path, written: Path) -> bool:
+    """Records the warning in the run's state; False when the run was warned about the file."""
+    with locked(path.parent):
+        state = read_state(path)
+        warned = state.get("warned")
+        if not isinstance(warned, list):
+            warned = []
+        if str(written) in warned:
+            return False
+        record(path, {**state, "warned": [*warned, str(written)]})
+    return True
+
+
+def next_step(found: Near, retro: bool, can_move: bool) -> str:
+    if not can_move:
+        return (
+            "Moving its lessons out would not bring it under the mark: the rest is pointer lines "
+            "and other text that is not a lesson. Propose in your report merging topics into "
+            "fewer files or shortening the pointer hooks, for the person to approve; do not make "
+            "those changes yourself."
+        )
+    if retro:
+        return (
+            "This is a retro run: propose verbatim moves of whole lessons in your report, with the "
+            "lines and the target topic file linked from MEMORY.md, for the person to approve; do "
+            "not make a move yourself that the person has not approved."
+        )
+    into = "another topic file"
+    if found.path.name == INDEX:
+        into = "a topic file"
+    return (
+        "In this same run, move whole lessons verbatim, with the same wording and the same "
+        f"`(source: …)`, into {into} linked from MEMORY.md, keeping one pointer line per topic in "
+        "MEMORY.md, and list the moved lines in your report. A verbatim move is not a compaction "
+        "and needs no approval."
+    )
+
+
+def advice(found: Near, retro: bool, can_move: bool) -> dict[str, Any]:
+    share = found.size / (found.cap_kb * 1024) * 100
+    text = (
+        f"agent-harness: {found.path} is at {found.size / 1024:.1f} KB of its {found.cap_kb:g} KB "
+        f"cap ({share:.0f} %), past the {found.ratio * 100:g} % warning mark. "
+        f"{next_step(found, retro, can_move)} Rewording, merging or deleting a lesson always goes "
+        "through the person."
+    )
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
+
+
+def early_warning(event: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
+    """PostToolUse: once per file and run, the advice to move lessons before the cap is reached.
+
+    Without a writable state the hook cannot tell a repeat, so it warns on every such write.
+    """
+    found = near_cap(event, environ)
+    if found is None:
+        return None
+    path = state_path(event, environ)
+    if not grew(event, found, read_state(path).get("baseline")):
+        return None
+    try:
+        first = mark_warned(path, found.path)
+    except OSError:
+        first = True
+    if not first:
+        return None
+    retro = is_retro(read_transcript(agent_transcript(dict(event))))
+    return advice(found, retro, movable(found))
+
+
 def decision(event: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
     if event.get("hook_event_name") == "SubagentStart":
         start(event, environ)
         return None
+    if event.get("hook_event_name") == "PostToolUse":
+        return early_warning(event, environ)
     path = state_path(event, environ)
     state = read_state(path)
     verdict = check(event, environ, state)
