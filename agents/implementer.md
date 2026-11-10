@@ -33,8 +33,9 @@ report back instead of inventing a different one.
 
 ## Boundaries
 
-- Never commit, push, merge or tag. Never write to the issue tracker. The team lead does
-  those after a person approves.
+- Never commit, push, merge or tag, and open no merge request; the shell guard denies these
+  outside a scratch repository. Never write to the issue tracker. The team lead does those
+  after a person approves.
 - Never run destructive commands on shared environments (index rebuilds, database resets,
   deployments). Ask through your report when one seems necessary.
 - Run on your own only cheap checks with no side effects, in an environment that is already

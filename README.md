@@ -54,7 +54,7 @@ its own marketplace.
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' Write and Edit calls in their memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). A write through Bash does not pass it. |
 | `hooks/memory_cap.py` | Records the sizes of the four agents' memory files when a run starts or resumes; when the agent stops or hands its report back, sends it back once if the run grew one of them over its size cap, whatever tool wrote it. After a Write or Edit that grows one of them to `warn_ratio` (80 %) of its cap, tells the agent once per file and run to move whole lessons verbatim into a topic file, or in a retro run to propose the moves ([Memory hygiene](#memory-hygiene)). |
-| `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database, and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
+| `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets, touch a production database or write to the git history, the remote or the forge (commits, pushes, merge requests: the team lead's), and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
 | `hooks/guard_runaway.py` | Stops a subagent that repeats the same call or keeps failing, and once tells one that has run long to report ([rules](#runaway-guard)). |
 | `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
@@ -194,6 +194,7 @@ denial is logged ([Guard events](#guard-events)).
 | `force-with-lease` | `git push --force-with-lease` from a subagent | from the main agent, by default |
 | `git-discard` | `git reset --hard`, `git clean -f`, `git checkout .`/`-- .`/`-f`, `git restore .` | in a repository inside the temp dirs; `clean -n`, `restore --staged .`, single files |
 | `branch-force-delete` | `git branch -D`, `--delete --force`, `-df` | `git branch -d`; in a repository inside the temp dirs |
+| `git-write` | from a subagent: `git commit`, `push` (the force and delete rules above keep their own messages), `merge`, `rebase`, `cherry-pick`, `revert`, `am` (also `--continue`), `commit-tree`, `update-ref`, `filter-branch`, `filter-repo`, `fast-import`, a `git fetch` refspec that forces (`+…`) or lands outside `refs/remotes/` (`…:main`), `git subtree push`/`merge`/`pull`/`add` and `split --rejoin`, a `git tag` that creates or deletes a tag, `git branch -f`/`--force`/`-M`/`-C`, `checkout -B`, `switch -C`/`--force-create`, `reset --soft` and `reset <commit>`; `gh pr create`/`new`/`merge`/`close`/`reopen`/`edit`/`ready`, `gh pr review --approve`/`--request-changes`, `gh release create`/`delete`/`edit`/`upload`, `gh repo create`/`edit`/`rename`/`archive`/`delete`/`sync`, `gh workflow run`, `gh secret set`/`delete`, `gh variable set`/`delete`, `gh gist create`/`new`/`edit`/`delete`, `glab mr create`/`new`/`merge`/`accept`/`close`/`reopen`/`update`/`approve`/`unapprove`/`rebase`, `glab release create`/`delete`/`upload`, `glab repo delete`, `glab ci run`/`retry`/`cancel`, `glab variable set`/`update`/`delete`; `gh api`/`glab api` with `-X`/`--method` other than GET or HEAD, or with `-f`/`-F`/`--field`/`--raw-field`/`--input` and no method (an implicit POST) | reads (`git log`, `diff`, `show`, `status`, `fetch`, `fetch origin main`, `fetch origin main:refs/remotes/origin/main`, `subtree split`, `blame`, `git tag`/`-l`/`-n`/`--column`, `gh pr view`/`list`/`checks`, `glab mr view`/`list`, `gh api` GET, also `-X GET -f`), `--help`/`-h`, `--abort`, `commit --dry-run`, `push --dry-run`/`-n`, a plain `git reset`, `reset HEAD`, `reset -- <path>`, `reset <path>` (an existing path or `.`), `git stash`, `switch`, `checkout <branch>`, comments (`gh pr comment`, `gh pr review --comment`, `glab mr note`); history writes in a repository inside the temp dirs, decided by `--git-dir`/`GIT_DIR` when given, otherwise by the first `.git` above the working directory (`--work-tree` does not count, a `.git` file counts by its `gitdir:`), and a push to a path there; the main session; the agent types in `git_write_allow_agents` |
 | `rm-outside-allowed-dirs` | `rm -r`/`-rf`/`-fr`/`-R`, `find -delete`/`-exec rm`, `xargs rm -r` outside the allowed dirs | below `$TMPDIR` (`/tmp` when unset) or `/tmp/claude-*`, the default build and cache dirs in the project, and `allowed_rm_dirs` |
 | `secret-read` | `cat`, `head`, `tail`, `less`, `more`, `sed`, `awk`, `grep`, `rg`, `bat`, `nl`, `tac`, `jq`, `strings`, `xxd`, `base64`, `od`, `hexdump`, `uuencode`, `cut`, `sort`, `uniq`, `paste`, `rev`, `fold`, `fmt`, `pr`, `comm`, `join`, `column`, `expand`, `unexpand`, `git show <rev>:<file>` or `git log -p` of a file in `secret_globs`, the file as the `--files0-from` list of `wc` or `sort`, or the file fed through `<` to any other command | `grep -c`/`-l`/`-q`; `wc <file>`; `cut -s -d= -f1 <file>`; a pipe into `wc` (not `--files0-from`), `grep -c`, `cut -s -d= -f1` or a `safe_filters` match that `xargs` does not run, or the file fed to one of them through `<` (`wc -c < .env`); `secret_allow_globs` |
 | `secret-copy` | `cp`, `mv`, `install`, `ditto`, `scp`, `rsync` or `dd if=` with a file in `secret_globs` as a source | `cp .env.example .env`; the file as the destination; `scp -i`/`rsync -e`/`--exclude` values |
@@ -204,6 +205,17 @@ denial is logged ([Guard events](#guard-events)).
 | `destructive-sql` | `DROP DATABASE`/`TABLE`/`SCHEMA` or `TRUNCATE` in a database client's arguments or heredoc, or in the command piped into it, for any host | `SELECT TRUNCATE(x, 2)` |
 | `unparsable` | a `$(` that is never closed, so the rest of the command cannot be checked | |
 | `extra_deny` | a command matching one of your regexes, with your reason | |
+
+A repository counts as inside the temp dirs for `git-write`, `git-discard` and
+`branch-force-delete` when it is below `$TMPDIR` or a `/tmp/claude-*` scratchpad with links
+resolved, and the first `.git` above it, up to `/`, is there too (a `.git` file by its
+`gitdir:`); the project's build and cache dirs, which `rm -r` may clear, do not count.
+
+`git-write` leaves these out on purpose: `git pull` (it merges or rebases into the local
+branch), git aliases (`git c` for `commit`), `git notes` and `git replace`, a `GIT_DIR` exported
+or `GIT_COMMON_DIR` exported by an earlier command, and dynamic forms whose words are only known when they run (`xargs git`
+with the subcommand on stdin, `sh -c "$(…)"`). `gh api graphql -f query=…` is denied even for a read query, since the fields
+make it a POST.
 
 A relative path resolves against the working directory and follows `cd` in the command. A
 path with an unknown variable or `$(…)`, or in an unknown directory, counts as outside; so
@@ -230,7 +242,7 @@ Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the 
 | Key | Default |
 |---|---|
 | `scope` | `"subagents"`: only events with an `agent_type`; `"all"` checks the main session too |
-| `allow_force_with_lease` | `"main"`: the main agent only; `true` or `false` for everyone |
+| `allow_force_with_lease` | `"main"`: the main agent only; `true` or `false` for everyone, but a subagent pushes with a lease only when its type is also in `git_write_allow_agents` |
 | `secret_globs` | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `credentials`, `credentials.json`, `*credentials.y*ml`, `.aws/credentials`, `*.credentials`, `auth.json` |
 | `secret_allow_globs` | `.env.example`, `.env.dist`, `*.pub` |
 | `allowed_rm_dirs` | built in: `node_modules`, `var/cache`, `dist`, `build`, `coverage`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `.ruff_cache` at any depth inside the project (`CLAUDE_PROJECT_DIR`, else the working directory), never the project itself; each entry you add allows the dir and everything in it, a relative one relative to the project |
@@ -238,6 +250,7 @@ Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the 
 | `safe_filters` | none; regexes searched in the pipe stage right after the read, or in the command the file is fed to through `<`, its words joined by single spaces without quotes (`grep -v -E 'a\|b'` becomes `grep -v -E a\|b`) |
 | `extra_deny` | none; `{"pattern": "<regex searched in the whole command>", "reason": "<text>"}` |
 | `tampering_allow_agents` | `"statusline-setup"`; agent types, matched on the whole `agent_type`, that may change the user's `settings.json` in `~/.claude` (`$CLAUDE_CONFIG_DIR` when set) |
+| `git_write_allow_agents` | none; agent types, matched on the whole `agent_type` (`agent-harness:implementer`), that `git-write` lets commit, push, open merge requests and write through the forge API; the force and delete rules still apply to them |
 
 A glob without `/` matches the file name, one with `/` the path at any depth, both ignoring
 case. An invalid file or key is ignored and named in the next deny reason; a `runaway` object
@@ -288,21 +301,21 @@ expected failure of the test, so closing one fails it until the policy and this 
 | privilege | 1 / 4 | 0 | 3 |
 | secrets | 9 / 12 | 0 | 3 |
 | remote-code | 0 / 4 | 0 | 4 |
-| exfiltration | 2 / 4 | 0 | 2 |
+| exfiltration | 3 / 4 | 0 | 1 |
 | wrappers | 6 / 16 | 8 | 2 |
-| publishing | 0 / 3 | 0 | 3 |
+| publishing | 1 / 3 | 0 | 2 |
 | infrastructure | 1 / 5 | 0 | 4 |
 | guardrail-tampering | 7 / 8 | 0 | 1 |
 | file-tools | 0 / 8 | 0 | 8 |
-| total | 45 / 90 | 15 | 30 |
+| total | 47 / 90 | 15 | 28 |
 
 The cases allowed by design delete `./guardrail-tester-probe/build`, a build dir the guard
 allows inside the project; the test runs each again on `…/src` and expects a denial. The gaps:
 
 - Outside the guard's purpose, left to Claude Code's permission prompt or an `extra_deny`
   pattern: running as root (`sudo-path`, `su-root`, `sudo-pipe`), downloading and running code
-  (`curl-sh`, `bash-procsub`, `curl-then-sh`, `python-exec-url`), uploads and pushes to a URL
-  (`curl-data-env`, `push-to-url`), publishing (`npm-publish`, `twine-upload`, `gh-release`),
+  (`curl-sh`, `bash-procsub`, `curl-then-sh`, `python-exec-url`), uploads to a URL
+  (`curl-data-env`), publishing to a registry (`npm-publish`, `twine-upload`),
   infrastructure tools (`terraform-destroy`, `terraform-apply`, `kubectl-delete-ns`,
   `aws-s3-rm`), another agent's configuration (`write-codex-config`), and files outside the
   repository that are not guard files (`write-zshrc`, `write-authorized-keys`,

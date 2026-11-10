@@ -77,18 +77,18 @@ def test_force_push_is_denied(command):
 
 
 @pytest.mark.parametrize(
-    "command",
+    ("command", "expected"),
     [
-        "git push",
-        "git push origin main",
-        "git push -u origin feature",
-        "git push -o ci.skip origin main",
-        "git push --follow-tags",
-        "git fetch --force",
+        ("git push", "git-write"),
+        ("git push origin main", "git-write"),
+        ("git push -u origin feature", "git-write"),
+        ("git push -o ci.skip origin main", "git-write"),
+        ("git push --follow-tags", "git-write"),
+        ("git fetch --force", None),
     ],
 )
-def test_a_normal_push_is_allowed(command):
-    assert rule(command) is None
+def test_a_normal_push_is_a_git_write_not_a_force_push(command, expected):
+    assert rule(command) == expected
 
 
 def test_force_with_lease_is_denied_to_subagents_by_default():
@@ -103,13 +103,24 @@ def test_force_with_lease_is_allowed_to_the_main_agent_by_default(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("setting", "agent", "denied"),
-    [(True, SUBAGENT, False), (False, None, True), (False, SUBAGENT, True), ("main", None, False)],
+    ("setting", "agent", "expected"),
+    [
+        (True, SUBAGENT, "git-write"),
+        (False, None, "force-with-lease"),
+        (False, SUBAGENT, "force-with-lease"),
+        ("main", None, None),
+    ],
 )
-def test_force_with_lease_follows_the_setting(tmp_path, setting, agent, denied):
+def test_force_with_lease_follows_the_setting(tmp_path, setting, agent, expected):
     home = guard_config(tmp_path, {"scope": "all", "allow_force_with_lease": setting})
-    result = rule("git push --force-with-lease", agent=agent, HARNESS_HOME=home)
-    assert result == ("force-with-lease" if denied else None)
+    assert rule("git push --force-with-lease", agent=agent, HARNESS_HOME=home) == expected
+
+
+def test_a_lease_push_needs_git_write_allow_agents_too(tmp_path):
+    home = guard_config(
+        tmp_path, {"allow_force_with_lease": True, "git_write_allow_agents": [SUBAGENT]}
+    )
+    assert rule("git push --force-with-lease", HARNESS_HOME=home) is None
 
 
 @pytest.mark.parametrize(
@@ -141,7 +152,6 @@ def test_discarding_work_is_denied(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "git reset --soft HEAD~1",
         "git reset HEAD src/shop.py",
         "git clean -n",
         "git clean -nd -f",
@@ -510,6 +520,7 @@ def test_every_deny_reason_names_the_rule_and_a_way_forward(tmp_path):
         "env-dump": "env",
         "keychain-read": "security find-generic-password -s shop -w",
         "guard-tampering": "echo x > .git/hooks/pre-commit",
+        "git-write": "git commit -m fix",
     }
     for expected, command in commands.items():
         reason = decide(command, HARNESS_HOME=home)
@@ -523,11 +534,14 @@ PR_BODY = "gh pr create --title x --body \"$(cat <<'EOF'\nIt's done.\nEOF\n)\""
 
 
 @pytest.mark.parametrize("message", [COMMIT, PR_BODY])
-def test_an_apostrophe_in_a_heredoc_inside_a_substitution_hides_nothing(message):
-    assert rule(message) is None
-    assert rule(message + " && git push --force") == "force-push"
-    assert rule(message + "; rm -rf src") == "rm-outside-allowed-dirs"
-    assert rule(message.replace("EOF\n)", "EOF\n) $(rm -rf src)")) == "rm-outside-allowed-dirs"
+def test_an_apostrophe_in_a_heredoc_inside_a_substitution_hides_nothing(tmp_path, message):
+    home = guard_config(tmp_path, {"git_write_allow_agents": [SUBAGENT]})
+    assert rule(message) == "git-write"
+    assert rule(message, HARNESS_HOME=home) is None
+    assert rule(message + " && git push --force", HARNESS_HOME=home) == "force-push"
+    assert rule(message + "; rm -rf src", HARNESS_HOME=home) == "rm-outside-allowed-dirs"
+    with_rm = message.replace("EOF\n)", "EOF\n) $(rm -rf src)")
+    assert rule(with_rm, HARNESS_HOME=home) == "rm-outside-allowed-dirs"
 
 
 @pytest.mark.parametrize(
@@ -633,8 +647,8 @@ def test_source_files_named_after_credentials_are_not_secrets(command):
         ("git push origin :refs/tags/v1", "push-delete"),
         ("git push --mirror", "push-delete"),
         ("git push --prune origin", "push-delete"),
-        ("git push origin feature:feature", None),
-        ("git push -o ci.skip origin main", None),
+        ("git push origin feature:feature", "git-write"),
+        ("git push -o ci.skip origin main", "git-write"),
         ('echo "DROP TABLE orders" | mysql shop', "destructive-sql"),
         ("printf 'truncate orders;' | psql", "destructive-sql"),
         ("cat <<'SQL' | mysql\nDROP TABLE orders;\nSQL", "destructive-sql"),
@@ -677,7 +691,7 @@ def test_more_ways_to_lose_work_or_leak_secrets(command, expected):
         ("bash -c 'git branch -D feature'", "branch-force-delete"),
         ("git branch -d feature", None),
         ("git branch --delete feature", None),
-        ("git branch -f feature main", None),
+        ("git branch -f feature main", "git-write"),
         ("git branch -a", None),
         (f"git -C {SCRATCH}/repo branch -D feature", None),
     ],
@@ -1287,6 +1301,7 @@ def guard_events(home: Path) -> list[dict[str, Any]]:
     [
         ("Bash", {"command": "cat .env.production"}, "secret-read"),
         ("Edit", {"file_path": "/work/shop/.claude/settings.local.json"}, "guard-tampering"),
+        ("Bash", {"command": "gh pr merge 12 --squash"}, "git-write"),
     ],
 )
 def test_each_denial_is_logged_without_the_command_or_path(tmp_path, tool, tool_input, expected):
@@ -1348,3 +1363,586 @@ def test_hooks_json_runs_the_guard_on_bash_and_the_file_tools(matcher):
     [group] = [g for g in config["hooks"]["PreToolUse"] if g["matcher"] == matcher]
     [handler] = [h for h in group["hooks"] if h["command"].endswith('/hooks/guard_shell.py"')]
     assert handler["timeout"] == 10
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m fix",
+        "git commit --amend --no-edit",
+        "git push",
+        "git push origin HEAD",
+        "git push https://example.invalid/r.git HEAD:main",
+        "git merge feature",
+        "git merge --ff-only origin/main",
+        "git tag v1.2.0",
+        "git tag -a v1.2.0 -m release",
+        "git tag -d v1.2.0",
+        "git tag --delete v1.2.0",
+        "git rebase main",
+        "git rebase -i HEAD~3",
+        "git cherry-pick abc123",
+        "git revert HEAD",
+        "git am < fix.patch",
+        "git commit-tree HEAD^{tree} -m x",
+        "git update-ref refs/heads/main HEAD",
+        "/usr/bin/git commit -m fix",
+        "git -C /work/other commit -m fix",
+        "git -c user.name=x commit -m fix",
+        "git --no-pager -c color.ui=never commit -m fix",
+        "GIT_AUTHOR_NAME=x git commit -m fix",
+        "env GIT_TRACE=1 git push",
+        "sudo -u deploy git push",
+        "ls && git commit -m fix",
+        "git status; git push",
+        "bash -c 'git commit -m fix'",
+        'sh -c "git push origin main"',
+        "eval git commit -m fix",
+        "echo main | xargs git push origin",
+        "bash <<'EOF'\ngit push\nEOF",
+        "(cd /work/shop && git commit -m fix)",
+        "git 'commit' -m fix",
+        "gh pr create --title x --body y",
+        "gh pr new --fill",
+        "gh pr merge 12 --squash",
+        "gh pr close 12",
+        "gh pr reopen 12",
+        "gh pr edit 12 --add-label x",
+        "gh pr -R owner/repo create --fill",
+        "glab -R owner/repo mr merge 12",
+        "gh release create v1.2.0 --notes x",
+        "gh release delete v1.2.0 --yes",
+        "gh release edit v1.2.0 --draft=false",
+        "gh repo delete owner/repo --yes",
+        "glab mr create --fill",
+        "glab mr new --fill",
+        "glab mr merge 12",
+        "glab mr accept 12",
+        "glab mr close 12",
+        "glab mr reopen 12",
+        "glab mr update 12 --draft",
+        "glab release create v1.2.0",
+        "glab release delete v1.2.0",
+        "gh api -X POST repos/o/r/issues",
+        "gh api --method PATCH repos/o/r/pulls/1",
+        "gh api --method=DELETE repos/o/r/git/refs/heads/x",
+        "gh api -XPUT repos/o/r/pulls/1/merge",
+        "gh api repos/o/r/issues -f title=x",
+        "gh api repos/o/r/issues -F body=@file.md",
+        "gh api repos/o/r/issues --field title=x",
+        "gh api repos/o/r/issues --raw-field title=x",
+        "gh api repos/o/r/issues --input body.json",
+        "gh api graphql -f query='mutation { x }'",
+        "glab api -X POST projects/1/merge_requests",
+        "glab api projects/1/merge_requests -f title=x",
+        "sudo gh pr merge 12",
+        "/opt/homebrew/bin/glab mr merge 12",
+    ],
+)
+def test_writes_to_the_history_the_remote_and_the_forge_are_denied(command):
+    assert rule(command) == "git-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git log --oneline -5",
+        "git log --grep=commit",
+        "git log --grep 'git push'",
+        "git diff main...HEAD",
+        "git show HEAD --stat",
+        "git status --short",
+        "git fetch origin",
+        "git blame src/shop.py",
+        "git stash",
+        "git stash pop",
+        "git switch feature",
+        "git checkout feature",
+        "git checkout -b fix main",
+        "git branch fix",
+        "git merge-base main HEAD",
+        "git tag",
+        "git tag -l 'v1.*'",
+        "git tag --list",
+        "git tag --contains abc123",
+        "git tag -n5",
+        "git tag -v v1.2.0",
+        "git help commit",
+        "git commit --help",
+        "git push -h",
+        "gh pr create --help",
+        "glab mr merge -h",
+        "cat commit",
+        "ls commit push merge",
+        "echo git push",
+        "echo 'git commit -m x' > notes.txt",
+        "printf 'git push\\n'",
+        "grep -rn 'git push' docs",
+        "cat <<'EOF'\ngit push --force\ngit commit -m x\nEOF",
+        "python3 -c 'print(\"git push\")'",
+        "gh pr view 12",
+        "gh pr list --state open",
+        "gh pr checks 12",
+        "gh pr diff 12",
+        "gh pr comment 12 --body 'looks good'",
+        "gh issue view 3",
+        "gh release view v1.2.0",
+        "gh repo view owner/repo",
+        "glab mr view 12",
+        "glab mr list",
+        "glab mr note 12 -m 'looks good'",
+        "glab mr diff 12",
+        "gh api repos/o/r/pulls",
+        "gh api repos/o/r/pulls --paginate --jq '.[].title'",
+        "gh api -X GET search/issues -f q=bug",
+        "gh api --method HEAD repos/o/r",
+        "glab api projects/1/merge_requests",
+        "gh --version",
+        "gh",
+    ],
+)
+def test_reads_comments_and_lookalikes_are_not_git_writes(command):
+    assert rule(command) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd", "expected"),
+    [
+        ("git commit -m probe", "/sandbox/tmp/repo", None),
+        ("git -C /sandbox/tmp/repo commit -m probe", "/work/shop", None),
+        (f"cd {SCRATCH}/repo && git commit -m probe && git tag v1", "/work/shop", None),
+        ("git rebase main", f"{SCRATCH}/repo", None),
+        ("git push /sandbox/tmp/remote.git main", "/sandbox/tmp/repo", None),
+        ("git push ../remote.git HEAD", "/sandbox/tmp/repo", None),
+        ("git push file:///sandbox/tmp/remote.git main", "/sandbox/tmp/repo", None),
+        ("git push --repo=/sandbox/tmp/remote.git", "/sandbox/tmp/repo", None),
+        ("git push", "/sandbox/tmp/repo", "git-write"),
+        ("git push origin main", "/sandbox/tmp/repo", "git-write"),
+        ("git push git@example.invalid:o/r.git main", "/sandbox/tmp/repo", "git-write"),
+        ("git push https://example.invalid/r.git", "/sandbox/tmp/repo", "git-write"),
+        ("git push /work/backup.git main", "/sandbox/tmp/repo", "git-write"),
+        ("git push --receive-pack /sandbox/tmp/x origin main", "/sandbox/tmp/repo", "git-write"),
+        ("git push --exec /sandbox/tmp/x origin", "/sandbox/tmp/repo", "git-write"),
+        ("gh pr create --fill", "/sandbox/tmp/repo", "git-write"),
+        ("cd /sandbox/tmp/repo; git commit -m probe", "/work/shop", "git-write"),
+        ("git commit -m fix", "/work/shop", "git-write"),
+    ],
+)
+def test_a_repository_inside_the_temp_dirs_may_be_written(command, cwd, expected):
+    assert rule(command, cwd=cwd) == expected
+
+
+def test_the_agents_in_git_write_allow_agents_may_write(tmp_path):
+    home = guard_config(tmp_path, {"git_write_allow_agents": [SUBAGENT, "deployer"]})
+
+    for command in ("git commit -m fix", "git push origin main", "gh pr create --fill"):
+        assert rule(command, HARNESS_HOME=home) is None
+        assert rule(command, agent="deployer", HARNESS_HOME=home) is None
+        assert rule(command, agent="agent-harness:reviewer-qa", HARNESS_HOME=home) == "git-write"
+        assert rule(command, agent="implementer", HARNESS_HOME=home) == "git-write"
+    assert rule("git push --force", HARNESS_HOME=home) == "force-push"
+    assert rule("git push --delete origin x", HARNESS_HOME=home) == "push-delete"
+
+
+@pytest.mark.parametrize("settings", [{}, {"scope": "all"}])
+def test_the_main_session_is_not_a_git_write(tmp_path, settings):
+    home = guard_config(tmp_path, settings)
+    for command in ("git commit -m fix", "git push", "gh pr merge 12", "gh api -X POST x"):
+        assert rule(command, agent=None, HARNESS_HOME=home) is None
+        assert rule(command, HARNESS_HOME=home) == "git-write"
+
+
+def test_a_git_write_denial_says_what_to_do_instead():
+    reason = decide("git push origin main")
+
+    assert reason is not None
+    assert reason.startswith("agent-harness guard, rule git-write: `git push` writes the ")
+    assert "leave the commit, push or MR to the team lead and put it in your report" in reason
+    forge = decide("gh pr create --fill")
+    assert forge is not None
+    assert "`gh pr create` writes to the forge" in forge
+
+
+def test_git_write_allow_agents_must_be_a_list_of_strings(tmp_path):
+    home = guard_config(tmp_path, {"git_write_allow_agents": "agent-harness:implementer"})
+
+    reason = decide("git commit -m fix", HARNESS_HOME=home)
+
+    assert reason is not None
+    assert "git_write_allow_agents must be a list, so it is ignored" in reason
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd"),
+    [
+        ("git --git-dir=/work/shop/.git commit -m x", "/sandbox/tmp/repo"),
+        ("git --git-dir /work/shop/.git commit -m x", "/sandbox/tmp/repo"),
+        ("GIT_DIR=/work/shop/.git git commit -m x", "/sandbox/tmp/repo"),
+        ("env GIT_DIR=/work/shop/.git git commit -m x", "/sandbox/tmp/repo"),
+        ("git --work-tree=/sandbox/tmp/x commit -am x", "/work/shop"),
+        ("git --work-tree /sandbox/tmp/x commit -am x", "/work/shop"),
+        (
+            "git -C /sandbox/tmp/repo --git-dir=/work/shop/.git update-ref refs/heads/x HEAD",
+            "/work/shop",
+        ),
+    ],
+)
+def test_the_repository_not_the_working_tree_decides_a_scratch_write(command, cwd):
+    assert rule(command, cwd=cwd) == "git-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git --git-dir=/sandbox/tmp/repo/.git commit -m x",
+        "GIT_DIR=/sandbox/tmp/repo/.git git -C /sandbox/tmp/repo commit -m x",
+    ],
+)
+def test_a_git_dir_inside_the_temp_dirs_may_be_written(command):
+    assert rule(command, cwd="/work/shop") is None
+
+
+def worktree(root: Path, gitdir: str) -> Path:
+    tree = root / "wt"
+    (tree / "sub").mkdir(parents=True)
+    (tree / ".git").write_text(f"gitdir: {gitdir}\n")
+    return tree
+
+
+def test_a_worktree_of_a_real_repository_in_the_temp_dirs_is_outside(tmp_path):
+    tree = worktree(tmp_path, "/work/shop/.git/worktrees/wt")
+    temp = {"TMPDIR": str(tmp_path)}
+
+    assert rule(f"git -C {tree} update-ref refs/heads/main HEAD", **temp) == "git-write"
+    assert rule("git commit -m x", cwd=str(tree / "sub"), **temp) == "git-write"
+    assert rule(f"git --git-dir={tree}/.git commit -m x", **temp) == "git-write"
+
+
+def test_a_worktree_of_a_scratch_repository_is_inside(tmp_path):
+    (tmp_path / "repo" / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    tree = worktree(tmp_path, "../repo/.git/worktrees/wt")
+    temp = {"TMPDIR": str(tmp_path)}
+
+    assert rule(f"git -C {tree} commit -m x", **temp) is None
+    assert rule("git commit -m x", cwd=str(tmp_path / "repo"), **temp) is None
+
+
+@pytest.mark.parametrize("content", ["not a gitdir line\n", None])
+def test_a_git_file_that_cannot_be_read_counts_as_outside(tmp_path, content):
+    tree = tmp_path / "wt"
+    tree.mkdir()
+    git_file = tree / ".git"
+    git_file.write_text(content or "gitdir: ../repo\n")
+    if content is None:
+        git_file.chmod(0)
+    try:
+        assert rule(f"git -C {tree} commit -m x", TMPDIR=str(tmp_path)) == "git-write"
+    finally:
+        git_file.chmod(0o644)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git merge --abort",
+        "git rebase --abort",
+        "git cherry-pick --abort",
+        "git am --abort",
+        "git revert --abort",
+        "git commit --dry-run",
+        "git push --dry-run origin main",
+        "git push -n origin main",
+        "git tag -n",
+        "git tag -n5",
+        "git tag -n 'v1.*'",
+        "git tag --column 'v1.*'",
+        "git reset",
+        "git reset -- src/shop.py",
+        "git reset HEAD",
+        "git reset -q HEAD -- src/shop.py",
+        "git branch -m new-name",
+        "git branch -u origin/main",
+        "git checkout -b fix main",
+        "git switch -c fix",
+        "gh pr review 12 --comment --body 'nit'",
+        "gh pr review 12 -c -b 'nit'",
+        "glab mr view 12",
+        "gh workflow list",
+        "gh secret list",
+        "glab ci status",
+        "glab variable list",
+        "gh repo view owner/repo",
+        "gh release download v1.2.0",
+    ],
+)
+def test_aborts_dry_runs_and_tag_listings_are_not_git_writes(command):
+    assert rule(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git merge --continue",
+        "git rebase --continue",
+        "git branch -f feature main",
+        "git branch --force feature main",
+        "git branch -M main",
+        "git branch -C old new",
+        "git branch -fu origin/x feature",
+        "git checkout -B main origin/main",
+        "git switch -C main origin/main",
+        "git switch --force-create main",
+        "git reset --soft HEAD~1",
+        "git reset HEAD~1",
+        "git reset origin/main",
+        "git reset --keep abc123",
+        "glab repo delete group/project",
+        "gh pr review 12 --approve",
+        "gh pr review 12 -a",
+        "gh pr review 12 --request-changes -b fix",
+        "gh pr review 12 -r -b fix",
+        "glab mr approve 12",
+        "glab mr unapprove 12",
+        "glab mr rebase 12",
+        "gh pr ready 12",
+        "gh release upload v1.2.0 dist/app.zip",
+        "glab release upload v1.2.0 dist/app.zip",
+        "gh repo create owner/new --private",
+        "gh repo edit --visibility public",
+        "gh repo rename new-name",
+        "gh repo archive owner/repo --yes",
+        "gh workflow run deploy.yml",
+        "glab ci run",
+        "glab ci retry 42",
+        "glab ci cancel 42",
+        "gh secret set TOKEN < token.txt",
+        "gh secret delete TOKEN",
+        "glab variable set TOKEN x",
+        "glab variable update TOKEN y",
+        "glab variable delete TOKEN",
+    ],
+)
+def test_equivalent_writes_are_denied_too(command):
+    assert rule(command) == "git-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git reset --soft HEAD~1",
+        "git branch -f feature main",
+        "git checkout -B main",
+        "git switch -C main",
+        "git merge --continue",
+    ],
+)
+def test_equivalent_writes_pass_in_a_scratch_repository(command):
+    assert rule(command, cwd="/sandbox/tmp/repo") is None
+
+
+PROJECT = {"CLAUDE_PROJECT_DIR": "/work/shop"}
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd", "expected"),
+    [
+        ("git commit -am x", "/work/shop/node_modules", "git-write"),
+        ("git commit -am x", "/work/shop/build", "git-write"),
+        ("git -C /work/shop/.mypy_cache commit -m x", "/work/shop", "git-write"),
+        ("cd /work/shop/dist && git rebase -i HEAD~3", "/work/shop", "git-write"),
+        ("git push /work/shop/build/remote.git main", "/sandbox/tmp/repo", "git-write"),
+        ("git reset --hard", "/work/shop/node_modules", "git-discard"),
+        ("git clean -fdx", "/work/shop/coverage", "git-discard"),
+        ("git branch -D feature", "/work/shop/build", "branch-force-delete"),
+        ("rm -rf /work/shop/build/out", "/work/shop", None),
+    ],
+)
+def test_the_projects_build_dirs_are_not_scratch_repositories(command, cwd, expected):
+    assert rule(command, cwd=cwd, **PROJECT) == expected
+
+
+def repository(path: Path) -> Path:
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
+def test_a_temp_dir_inside_a_repository_is_not_a_scratch_repository(tmp_path):
+    repo = repository(tmp_path / "repo")
+    work = repo / "tmp" / "probe"
+    work.mkdir(parents=True)
+    temp = {"TMPDIR": str(repo / "tmp")}
+
+    for command in ("git commit -m x", "git reset --hard", "git branch -D x"):
+        assert rule(command, cwd=str(work), **temp) is not None
+    assert rule("git commit -m x", cwd=str(work), TMPDIR=str(repo / "tmp" / "probe")) is not None
+
+
+def test_a_scratch_repository_under_a_temp_dir_is_one(tmp_path):
+    repo = repository(tmp_path / "temp" / "repo")
+    (repo / "src").mkdir()
+    temp = {"TMPDIR": str(tmp_path / "temp")}
+
+    for command in ("git commit -m x", "git reset --hard", "git branch -D x", "git rebase main"):
+        assert rule(command, cwd=str(repo / "src"), **temp) is None
+
+
+def test_a_git_link_to_a_real_repository_is_outside(tmp_path):
+    real = repository(tmp_path / "real")
+    link = tmp_path / "temp" / "symrepo"
+    link.mkdir(parents=True)
+    (link / ".git").symlink_to(real / ".git")
+    dir_link = tmp_path / "temp" / "dirlink"
+    dir_link.symlink_to(real)
+    temp = {"TMPDIR": str(tmp_path / "temp")}
+
+    assert rule("git commit -m x", cwd=str(link), **temp) == "git-write"
+    assert rule(f"git --git-dir={link}/.git commit -m x", **temp) == "git-write"
+    assert rule(f"GIT_DIR={link}/.git git commit -m x", **temp) == "git-write"
+    assert rule("git reset --hard", cwd=str(link), **temp) == "git-discard"
+    assert rule(f"git -C {dir_link} commit -m x", **temp) == "git-write"
+
+
+def test_a_gitdir_link_to_a_real_repository_is_outside(tmp_path):
+    real = repository(tmp_path / "real")
+    temp_dir = tmp_path / "temp"
+    (temp_dir / "worktrees").mkdir(parents=True)
+    (temp_dir / "worktrees" / "wt").symlink_to(real / ".git")
+    tree = worktree(temp_dir, str(temp_dir / "worktrees" / "wt"))
+
+    assert rule(f"git -C {tree} commit -m x", TMPDIR=str(temp_dir)) == "git-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git --git-dir=.git -C /work/shop commit -m x",
+        "GIT_DIR=.git git -C /work/shop commit -m x",
+        "git --git-dir .git -C /work/shop update-ref refs/heads/x HEAD",
+    ],
+)
+def test_a_relative_git_dir_resolves_against_the_final_dash_c(command):
+    assert rule(command, cwd="/sandbox/tmp/repo") == "git-write"
+
+
+def test_a_relative_git_dir_into_a_scratch_repository_is_inside():
+    assert rule("git -C /sandbox/tmp/repo --git-dir=.git commit -m x", cwd="/work/shop") is None
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("git reset file.txt", None),
+        ("git reset src/", None),
+        ("git reset src", None),
+        ("git reset .", None),
+        ("git reset -q file.txt", None),
+        ("git reset main", "git-write"),
+        ("git reset HEAD~1", "git-write"),
+        ("git reset missing.txt", "git-write"),
+    ],
+)
+def test_a_reset_of_a_path_only_unstages(tmp_path, command, expected):
+    (tmp_path / "file.txt").write_text("x")
+    (tmp_path / "src").mkdir()
+
+    assert rule(command, cwd=str(tmp_path)) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh variable set NAME --body x",
+        "gh variable delete NAME",
+        "gh repo sync",
+        "gh repo sync owner/fork --force",
+        "gh gist create notes.md",
+        "gh gist new notes.md",
+        "gh gist edit abc123",
+        "gh gist delete abc123",
+    ],
+)
+def test_more_forge_writes_are_denied(command):
+    assert rule(command) == "git-write"
+
+
+@pytest.mark.parametrize("command", ["gh variable list", "gh gist view abc123", "gh gist list"])
+def test_more_forge_reads_are_allowed(command):
+    assert rule(command) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("git --git-dir=/work/shop/build/.git commit -m x", "git-write"),
+        ("GIT_DIR=/work/shop/node_modules/.git git commit -m x", "git-write"),
+        ("git -C /sandbox/tmp/repo --work-tree=/work/shop reset --hard", "git-discard"),
+        ("git reset .", None),
+    ],
+)
+def test_build_dirs_and_an_outside_work_tree_do_not_count(command, expected):
+    assert rule(command, cwd="/work/shop", **PROJECT) == expected
+
+
+def test_a_worktree_pointing_into_a_build_dir_is_outside(tmp_path):
+    tree = worktree(tmp_path, "/work/shop/build/wt-git")
+
+    assert rule(f"git -C {tree} commit -m x", TMPDIR=str(tmp_path), **PROJECT) == "git-write"
+
+
+def test_a_dangling_git_link_counts_by_its_target(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").symlink_to("/work/shop/.git")
+
+    assert rule("git commit -m x", cwd=str(repo), TMPDIR=str(tmp_path)) == "git-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git filter-branch --force --tree-filter 'rm -f secret' HEAD",
+        "git filter-repo --path x --invert-paths",
+        "git fast-import < dump",
+        "git fetch . +HEAD~3:refs/heads/main",
+        "git fetch origin +main:main",
+        "git fetch origin main:main",
+        "git fetch origin main:refs/heads/main",
+        "git fetch --depth 1 origin +refs/heads/*:refs/remotes/origin/*",
+        "git subtree push --prefix lib origin main",
+        "git subtree merge --prefix lib main",
+        "git subtree pull --prefix=lib origin main",
+        "git subtree add -P lib origin main",
+        "git subtree split --prefix lib --rejoin",
+        "git subtree -P lib push origin main",
+    ],
+)
+def test_history_rewrites_local_ref_fetches_and_subtree_writes_are_denied(command):
+    assert rule(command) == "git-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git fetch",
+        "git fetch origin",
+        "git fetch origin main",
+        "git fetch origin main:refs/remotes/origin/main",
+        "git fetch --depth 1 origin main",
+        "git fetch -j 4 origin main",
+        "git fetch git@example.invalid:o/r.git main",
+        "git fetch origin -o a:b main",
+        "git fetch origin --server-option a:b main",
+        "git subtree split --prefix lib",
+        "git subtree split -P lib -b split-branch",
+    ],
+)
+def test_fetches_into_remote_refs_and_subtree_split_are_reads(command):
+    assert rule(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["git fetch origin +main:main", "git filter-repo --path x", "git subtree add -P lib o main"],
+)
+def test_these_writes_pass_in_a_scratch_repository(command):
+    assert rule(command, cwd="/sandbox/tmp/repo") is None
