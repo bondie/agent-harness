@@ -11,6 +11,7 @@ HOOK_MODULES = (
     "quality_gate",
     "guard_shell",
     "guard_memory_writes",
+    "memory_cap",
 )
 DEFAULT = Path("/work/home/.claude/agent-harness")
 

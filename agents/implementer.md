@@ -14,8 +14,9 @@ report back instead of inventing a different one.
 ## How you work
 
 0. **Read your memory first.** It holds what you learned in this codebase before: how to run
-   the tests and the stack, traps, conventions a person or the reviewer asked for. Use it
-   instead of searching again.
+   the tests and the stack, traps, conventions a person or the reviewer asked for. Only its
+   index is in this prompt: open the topic files it links for this codebase and task before
+   you start, and use them instead of searching again.
 1. **Read before writing.** Open every file you will change and the tests that cover it.
    Follow the conventions you find there: naming, structure, error handling, comment style.
 2. **Test first where it is cheap.** Add or extend a test that fails for the reported
@@ -44,9 +45,10 @@ report back instead of inventing a different one.
 
 ## Memory
 
-Your memory directory is loaded into this prompt at the start of every run. Before you report,
-update it with what would have saved you time today, one fact per line and with the
-repository it applies to:
+Only the index of your memory, `MEMORY.md`, is loaded into this prompt; the topic files it
+links are not. Open the ones the task needs before you start: each index line says what its
+file holds. Before you report, update your memory with what would have saved you time today,
+one fact per line and with the repository it applies to:
 
 - **Commands** that run the tests, linters and the local stack, and the ones that do not.
 - **Traps** you hit and how you got out (a stale cache, a container that needs a restart, a
@@ -55,8 +57,10 @@ repository it applies to:
 
 Write each note as one bullet that ends with its source and date: `- <note> (source:
 <KEY|MR|commit|retro>, YYYY-MM-DD[, expires YYYY-MM-DD])`; a hook denies a new bullet without
-them and a file over its size cap. Never record a path in a temporary directory (a scratchpad,
-`/tmp`): it is gone by the next run, so record how to rebuild what was there.
+them and a file over its size cap. Write memory only with Edit or Write, never through Bash
+(`cat >>`, `sed -i`, a script): Bash writes skip the format and size checks. Never record a
+path in a temporary directory (a scratchpad, `/tmp`): it is gone by the next run, so record
+how to rebuild what was there.
 
 Fix or delete a note that turns out wrong. Never store secrets, ticket text or customer data.
 

@@ -44,15 +44,16 @@ its own marketplace.
 | `agent-harness:implementer` | Implements the approved approach test-first, inside its scope, and reports where the time went. Never commits or writes to the tracker. Remembers commands, traps and conventions per codebase. |
 | `agent-harness:reviewer-qa` | Reviews the diff against the acceptance criteria and the codebase's review skill when there is one, runs the checks, reports `path:line` findings and a verdict. Runs on the session's model at `xhigh` effort. Does not edit; remembers rejected findings and recurring defects. |
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
-| `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. `--by version\|model` groups each agent's runs by plugin version or model, `--split DATE` compares them before and after a moment such as a plugin update. |
+| `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. `--by version\|model` groups each agent's runs by plugin version or model, `--split DATE` compares them before and after a moment such as a plugin update, `--memory` adds how much of a run was the agent's memory. |
 | `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened; each agent proposes lessons for its memory and writes the ones the person approves. |
 | `/agent-harness:upgrade-impact` | A [dynamic workflow](https://code.claude.com/docs/en/workflows): before a dependency upgrade, one agent per component group reads the changelog in the version range and finds the changes your code uses; skeptics try to refute each risk. Returns the risks that survive, with `repo:path:line` and a test for each. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
-| `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens, model, plugin version and ticket key to `~/.claude/agent-harness/runs.jsonl`. |
+| `hooks/log_agent_runs.py` | After every finished subagent run, appends its duration, requests, tool calls, tokens, model, plugin version, ticket key and the characters of its own memory it got in its prompt, opened with Read and touched through Bash to `~/.claude/agent-harness/runs.jsonl`. |
 | `hooks/save_artifacts.py` | After every finished run of the four agents, keeps its report and its structured block per ticket in `~/.claude/agent-harness/tickets/<KEY>/` (under `$HARNESS_HOME` when set). |
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
-| `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). |
+| `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' Write and Edit calls in their memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). A write through Bash does not pass it. |
+| `hooks/memory_cap.py` | Records the sizes of the four agents' memory files when a run starts or resumes; when the agent stops or hands its report back, sends it back once if the run grew one of them over its size cap, whatever tool wrote it ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets or touch a production database, and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
 | `hooks/guard_runaway.py` | Stops a subagent that repeats the same call or keeps failing, and once tells one that has run long to report ([rules](#runaway-guard)). |
 | `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
@@ -404,7 +405,9 @@ Another hook appends with `log_guard_event(environ, event, hook, rule, decision)
 ## Memory hygiene
 
 Each agent keeps its memory in `~/.claude/agent-memory/<agent>/` (`memory: user`): the index
-`MEMORY.md`, which Claude Code loads into the agent's prompt, and topic files. A note without a
+`MEMORY.md`, which Claude Code loads into the agent's prompt (its first 200 lines or 25 KB), and
+topic files, which it does not load: the agents' prompts tell them to open the ones a task needs
+and to write memory only with Edit or Write. A note without a
 source or a date cannot be checked or retired, so every lesson is one bullet that ends with
 both:
 
@@ -434,6 +437,33 @@ With `"require_source": false` a date alone, `(YYYY-MM-DD)`, is enough.
 { "max_file_kb": 8, "max_index_kb": 4, "require_source": true }
 ```
 
+**The cap at the end of a run.** A write through Bash (`cat >>`, `sed -i`, a script) never
+reaches the guard, so `hooks/memory_cap.py` checks the files themselves. When one of the four
+agents starts or resumes (SubagentStart), it records the time and the size of every file in the
+agent's own memory directory. When the agent stops, and in auto mode when it calls
+SubagentHandback, a file sends it back once when all three hold:
+
+- it is over its cap (the same caps as the guard);
+- it is larger than at the recorded start, or new;
+- a tool call the agent made since that start writes it: a Write, Edit or MultiEdit of it, or a
+  Bash command that names it (its path, or its file name and the agent's memory directory
+  name) and is shaped like a write: a `>` or `>>` redirection to it, `sed -i`, `perl -i`,
+  `tee`, `cp`, `mv`, `rsync` or `install` into the directory, or Python that calls `open()`
+  with a `w`, `a` or `x` mode, `write_text` or `write_bytes`. Reading it with `cat`, `head`,
+  `grep` or `wc` does not count.
+
+The message names the file, its size and the cap, says "through Bash" only when such a Bash
+command wrote it, and asks the agent to move detail into a topic file linked from `MEMORY.md`
+and to write with Edit or Write. After that one block it lets the agent finish and warns you;
+the count starts over at the next start. A file that shrank, one only a parallel run of the
+same agent wrote and one the run only read do not block, and retro runs are checked too. The
+lesson format is not checked there.
+
+Without a recorded start (the hook missed SubagentStart, or its state is unreadable), the run
+counts from the last prompt or coordinator message that followed a stop (a SubagentHandback
+call or a turn of text alone), and "larger" becomes "modified since then", so a shrink there
+cannot be told from growth.
+
 **The lint**, from a checkout of this repository (or with `uvx`, as in
 [Measuring the team](#measuring-the-team-not-just-the-estimator)):
 
@@ -446,7 +476,8 @@ uv run harness-eval memory prune --expired [--apply]
 ones, dead paths and the files over the cap, and exits with 1 when it finds any. A dead path is
 an absolute path in a lesson that does not exist although its top directory does; URL paths
 and a container's `/app/…` are skipped that way, a container path under `/usr` or `/tmp` is
-not. `prune --expired` removes the lessons whose expiry date has come, with their continuation
+not. Of `host:container` (a volume mapping, `file:42`) only the host side is checked, and a path
+right after a placeholder (`/opt/<v>/bin`) is not checked. `prune --expired` removes the lessons whose expiry date has come, with their continuation
 lines; without `--apply` it only lists them. The `retro` skill writes only the lines the person
 approved and suggests the lint every few retros.
 
