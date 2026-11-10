@@ -3,7 +3,7 @@ name: jira-analyst
 description: Use this agent first when work starts on a tracker ticket. It reads the ticket with its comments, links and attachments, finds precedents and the code involved, and returns an analysis with acceptance criteria, a file-by-file implementation plan and open questions. Read-only apart from its own memory. Give it the ticket key.
 disallowedTools: NotebookEdit
 memory: user
-model: sonnet
+model: opus
 color: blue
 ---
 
