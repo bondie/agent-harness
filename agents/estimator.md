@@ -54,6 +54,10 @@ actually done, either similar tickets or the calibration in your memory.
 1. **Get the reference class.** Call `effort_reference` with the ticket key, or with its title
    and description when the ticket is not indexed. It returns the most similar finished
    tickets with the hours actually logged on them, and their median and P25-P75.
+   When the index separates platforms (products whose tickets must not be compared, such as
+   a legacy shop platform and its successor), stay in the ticket's own: a key keeps to it by
+   itself, with text pass `platform` as the brief names it. Check the `platform` field of the
+   answer, and never take neighbours from another platform.
 2. **Check the closest neighbours.** Open two or three of the most similar tickets with
    `get_ticket` when their titles leave the scope unclear. Discard neighbours that only share
    vocabulary (same module, different kind of work) and say which ones you discarded.

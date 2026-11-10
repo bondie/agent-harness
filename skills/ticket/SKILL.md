@@ -37,6 +37,11 @@ the correction as one memory line, `- <correction and revised estimate> (source:
 <today>)`, without writing it. Show the line to the person; send it back to be written exactly
 as given only once they approve or edit it, as in the retro.
 
+When the precedent index separates platforms (`list_sources` shows a `platform` per source),
+tell the estimator the ticket's platform, as the analysis names it. Tickets of another
+platform distort the estimate: the same kind of work can take several times longer on a
+legacy product.
+
 When the project's instructions (CLAUDE.md) name a date since which the team works
 differently, for example implementing with AI agents, tell the estimator the date and ask
 it to call `effort_reference` with `since` set to it. Older tickets then overstate the
