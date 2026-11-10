@@ -77,14 +77,33 @@ def test_an_unclosed_front_matter_is_a_rule():
     assert [lesson.first for lesson in memory.lessons("---\n- A lesson\n")] == [2]
 
 
-@pytest.mark.parametrize("index", [True, False])
-def test_the_hook_and_the_cli_read_lessons_alike(index):
-    hook = load_hook()
-    for name in ("BULLET", "INDEX_LINK", "TRAILER"):
-        assert getattr(hook, name).pattern == getattr(memory, name).pattern
-    found = memory.lessons(SAMPLE, index)
+FENCED = (
+    "- Before (source: SHOP-1, 2026-01-15)\n"
+    "````md\n"
+    "```\n"
+    "- inside the longer fence\n"
+    "# comment\n"
+    "```\n"
+    "~~~~\n"
+    "````  \n"
+    "~~~\n"
+    "- inside a tilde fence\n"
+    "~~~~\n"
+    "- After (source: SHOP-2, 2026-01-15)\n"
+)
 
-    assert [(lesson.first, lesson.text) for lesson in found] == hook.lessons(SAMPLE, index)
+
+@pytest.mark.parametrize("sample", [SAMPLE, FENCED])
+@pytest.mark.parametrize("index", [True, False])
+def test_the_hook_and_the_cli_read_lessons_alike(index, sample):
+    hook = load_hook()
+    for name in ("BULLET", "INDEX_LINK", "TRAILER", "FENCE"):
+        assert getattr(hook, name).pattern == getattr(memory, name).pattern
+    found = memory.lessons(sample, index)
+
+    assert [(lesson.first, lesson.text) for lesson in found] == hook.lessons(sample, index)
+    if sample == FENCED:
+        assert [lesson.first for lesson in found] == [1, 12]
     for lesson in found:
         complete = lesson.day is not None and lesson.source is not None
         assert (hook.problem(lesson.text, True) is None) == complete

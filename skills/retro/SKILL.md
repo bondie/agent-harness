@@ -43,7 +43,9 @@ and say so in the report.
   `release`) only for a part whose time was measured, with `--source measured` when all of
   it was; never split the logged total into parts by guess.
 - The memory size: `harness-eval memory lint` (README, "Memory hygiene") lists per agent the
-  files near the cap (at `warn_ratio` of it, 80 % by default) and over it, with the share.
+  files near the cap (at `warn_ratio` of it, 80 % by default) and over it, with the share, and
+  `harness-eval memory compact` without `--apply` proposes verbatim moves of whole sections for
+  them; give each agent its part in step 2.
 
 ## 2. Have each agent propose its lessons
 
@@ -54,9 +56,11 @@ YYYY-MM-DD])`, and the existing lines to change or delete. For each memory file 
 as near or over its cap, also propose verbatim moves: which whole lessons, wording and source
 unchanged, go into which topic file linked from MEMORY.md, and the pointer line MEMORY.md
 needs; when its lessons cannot bring it under the mark, propose merging topics or shortening
-pointers." The plugin's hooks recognise a retro run by that start and do not ask it for a
-block. Use `retro` as the source for a lesson that outgrows the ticket, and an expiry for one
-tied to a version, release or incident.
+pointers. Propose a `<!-- keep -->` marker for a section of MEMORY.md that must stay in the
+prompt, and new `##` headings that split a file of bullets under one title into sections."
+The plugin's hooks recognise a retro run by that start and do not ask it for a block. Use
+`retro` as the source for a lesson that outgrows the ticket, and an expiry for one tied to a
+version, release or incident.
 Send each only what concerns it, and skip an agent with nothing new:
 
 - **estimator:** a calibration row (repositories, files, lines with tests, the person's
@@ -65,13 +69,13 @@ Send each only what concerns it, and skip an agent with nothing new:
 - **implementer:** where the time went and the commands or conventions that would have saved it.
 - **reviewer-qa:** the findings the person rejected and why, and defects that got through.
 - **every agent with a file near or over its cap:** those files from the lint in step 1, each
-  with its size, its cap and the warning mark (`warn_ratio`), so the moves land in the list of
-  step 3.
+  with its size, its cap and the warning mark (`warn_ratio`), and the moves `compact` proposed
+  for them, so the moves land in the list of step 3.
 
 ## 3. Let the person decide
 
-Show the proposed lines and moves per agent, numbered, to approve, edit or reject each.
-Nothing goes into memory before that: a wrong lesson misleads every later run, and a
+Show the proposed lines, moves, headings and markers per agent, numbered, to approve, edit or
+reject each. Nothing goes into memory before that: a wrong lesson misleads every later run, and a
 remembered rejection can hide the next real finding.
 
 ## 4. Write the approved lines
@@ -86,6 +90,14 @@ lessons with the same wording and the same `(source: …)` into a topic file lin
 lines in its report; in a retro run it proposes the move in its report, with the lines and the
 target file, for the person to approve. Rewording, merging or deleting a lesson always goes
 through the person.
+
+When the person approved every move `compact` proposed for a file, with a `<!-- keep -->`
+marker on each section they rejected, have the agent write the approved lines, headings and
+markers first. Then run `harness-eval memory compact --file <path>` yourself, as in step 1,
+without `--apply`, and compare its proposal with the approved moves. Add `--apply`, while no
+other agent runs, only when the two are the same. When they differ (a new heading made a
+section nobody proposed), show the difference to the person and apply nothing before they
+approve it. Otherwise the agent makes the approved moves with Edit or Write.
 
 ## 5. Report
 
