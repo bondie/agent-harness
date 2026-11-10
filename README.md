@@ -568,7 +568,12 @@ noticed that one package was already newer).
 Full tables: [`results/2026-backtest.md`](results/2026-backtest.md).
 
 **Setup.** The tickets of eight private JIRA projects with logged time, created in 2026 and
-done, up to 40 h (1,212 tickets; the LLM variants ran on a random 150 of them, seed 7). Ground
+done, up to 40 h (1,212 tickets; the LLM variants ran on a random 150 of them, seed 7). The
+targets and their neighbours come only from one platform's sources (`--platform`, by default
+the config's `default_platform`), but another platform in the same index still changes how
+the neighbours rank: keyword statistics cover the whole index, and for a platform of several
+sources the nearest chunks are taken from the whole index before the filter. A comparable
+backtest needs an index that holds only that platform. Ground
 truth is the logged time. For each ticket, only tickets whose time was all logged before it
 was created can be retrieved. The LLM variants use the shipped estimator prompt, run
 headless, with numbers next to estimate words in the ticket text masked (16 of 150 tickets).
@@ -792,6 +797,7 @@ uv sync                      # installs ticket-precedent from GitHub at a pinned
 uv run pytest --cov          # no network, no model, no tracker needed (workflow tests need node)
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 claude plugin validate .
+uv run harness-eval run --out runs/NAME --from YYYY-MM-DD --to YYYY-MM-DD [--platform P]
 ```
 
 ## License

@@ -52,6 +52,7 @@ class NeighbourMedian:
     searcher: Searcher
     k: int = 10
     since: str | None = None
+    sources: frozenset[str] | None = None
     name: str = "neighbour-median"
 
     def estimate(self, target: Target) -> Estimate | None:
@@ -62,7 +63,7 @@ class NeighbourMedian:
 
     def reference(self, target: Target) -> ReferenceClass:
         row = self.searcher.store.tickets_by_id([target.ticket_id])[target.ticket_id]
-        return reference_for_ticket(self.searcher, row, self.k, self.since)
+        return reference_for_ticket(self.searcher, row, self.k, self.since, sources=self.sources)
 
     def cited(self, found: ReferenceClass) -> list[str]:
         rows = self.searcher.store.tickets_by_id(hit.ticket_id for hit in found.hits)
@@ -103,8 +104,8 @@ class EraScaledMedian(NeighbourMedian):
 
     def _factor(self, as_of: str) -> float:
         store = self.searcher.store
-        recent = finished_hours(store, as_of, created_from=self.change)
-        older = finished_hours(store, as_of, created_to=self.change)
+        recent = finished_hours(store, as_of, created_from=self.change, sources=self.sources)
+        older = finished_hours(store, as_of, created_to=self.change, sources=self.sources)
         if len(recent) < MIN_RECENT or not older:
             return 1.0
         return statistics.median(recent) / statistics.median(older)

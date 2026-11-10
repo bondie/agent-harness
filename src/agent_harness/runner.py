@@ -18,6 +18,7 @@ from .dataset import Target
 from .llm import LLMError
 
 RECOVERABLE = (LLMError, httpx.HTTPError, subprocess.TimeoutExpired)
+MANIFEST = "manifest.json"
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,28 @@ def target_id(target: Target) -> str:
 
 def run_file(directory: Path, variant: str) -> Path:
     return directory / f"{re.sub(r'[^A-Za-z0-9.@-]+', '_', variant)}.jsonl"
+
+
+def claim_directory(directory: Path, manifest: dict[str, Any]) -> str | None:
+    """Keep a resume from mixing platforms or indexes; directories from before manifests warn."""
+    path = directory / MANIFEST
+    if path.exists():
+        _check_manifest(directory, json.loads(path.read_text()), manifest)
+        return None
+    if any(directory.glob("*.jsonl")):
+        return f"warning: {directory} has no {MANIFEST}, so its platform and index are not checked"
+    directory.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return None
+
+
+def _check_manifest(directory: Path, recorded: dict[str, Any], manifest: dict[str, Any]) -> None:
+    changed = [key for key, value in manifest.items() if recorded.get(key) != value]
+    if not changed:
+        return
+    then = ", ".join(f"{key} {recorded.get(key)!r}" for key in changed)
+    now = ", ".join(f"{key} {manifest[key]!r}" for key in changed)
+    raise ValueError(f"{directory} was run with {then}; this run has {now}: use another --out")
 
 
 def run(

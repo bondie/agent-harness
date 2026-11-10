@@ -25,6 +25,8 @@ from agent_harness.llm import (
 )
 from agent_harness.memory import Memory, lessons
 
+from .conftest import SHOP_SOURCES
+
 ANSWER = {
     "median_hours": 1.5,
     "p25_hours": 1.0,
@@ -124,6 +126,19 @@ def test_recent_reference_class(store, searcher):
     user = backend.calls[0][1]
     assert "SHOP-4" in user
     assert "SHOP-1 " not in user
+
+
+def test_the_reference_class_stays_in_the_platform(mixed_store, mixed_searcher):
+    shop = target(mixed_store, "SHOP-6")
+    everywhere, scoped = Recorder(), Recorder()
+
+    LLMEstimator(everywhere, mixed_searcher).estimate(shop)
+    LLMEstimator(scoped, mixed_searcher, sources=SHOP_SOURCES).estimate(shop)
+
+    assert "LEG-1 · Bug" in everywhere.calls[0][1]
+    assert "SHOP-4 · Bug" in scoped.calls[0][1]
+    assert "HD-1 · Bug" in scoped.calls[0][1]
+    assert "LEG-" not in scoped.calls[0][1]
 
 
 def test_reference_class_can_be_empty(store, searcher):

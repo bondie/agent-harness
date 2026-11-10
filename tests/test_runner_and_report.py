@@ -1,9 +1,10 @@
 import itertools
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
+from ticket_precedent.config import Config, EmbeddingConfig, SourceConfig
 from ticket_precedent.search import Searcher
 
 from agent_harness import cli
@@ -121,6 +122,7 @@ def test_cli_run_and_report(config_file, tmp_path, capsys):
     assert cli.main([*arguments, "--config", str(config_file)]) == 0
     assert "4 tickets" in capsys.readouterr().err
     assert {p.name for p in out.iterdir()} == {
+        "manifest.json",
         "neighbour-median.jsonl",
         "recent-median.jsonl",
         "era-scaled-median.jsonl",
@@ -129,6 +131,51 @@ def test_cli_run_and_report(config_file, tmp_path, capsys):
 
     assert cli.main(["report", str(out)]) == 0
     assert "| recent-median |" in capsys.readouterr().out
+
+
+@pytest.fixture
+def no_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.delenv("TICKET_PRECEDENT_CONFIG", raising=False)
+    return tmp_path / "xdg-config" / "ticket-precedent" / "config.yaml"
+
+
+def human_run(out, *extra):
+    base = ["run", "--out", str(out), "--from", "2026-01-01", "--to", "2027-01-01"]
+    return cli.main([*base, "--variants", "human", *extra])
+
+
+def test_cli_run_refuses_a_named_config_that_does_not_exist(
+    no_user_config, tmp_path, monkeypatch, capsys
+):
+    missing = tmp_path / "missing.yaml"
+
+    assert human_run(tmp_path / "by-option", "--config", str(missing)) == 1
+    assert f"--config names {missing}, which does not exist" in capsys.readouterr().err
+    monkeypatch.setenv("TICKET_PRECEDENT_CONFIG", str(missing))
+    assert human_run(tmp_path / "by-env") == 1
+    assert f"TICKET_PRECEDENT_CONFIG names {missing}" in capsys.readouterr().err
+    assert not (tmp_path / "by-option").exists()
+    assert not (tmp_path / "by-env").exists()
+
+
+def test_cli_run_without_a_named_config_uses_the_default_path(
+    no_user_config, store, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr("agent_harness.cli.build_searcher", lambda config, store: _searcher(store))
+
+    assert human_run(tmp_path / "no-config") == 0
+    assert "platform all: 0 tickets" in capsys.readouterr().err
+
+    no_user_config.parent.mkdir(parents=True)
+    no_user_config.write_text(f"index_path: {store.path}\nsources: []\n")
+    assert human_run(tmp_path / "default-file") == 0
+    assert "platform all: 4 tickets" in capsys.readouterr().err
+
+    monkeypatch.setenv("TICKET_PRECEDENT_CONFIG", str(no_user_config))
+    assert human_run(tmp_path / "by-env") == 0
+    assert "platform all: 4 tickets" in capsys.readouterr().err
 
 
 def test_cli_errors(config_file, tmp_path, capsys):
@@ -143,6 +190,159 @@ def test_cli_errors(config_file, tmp_path, capsys):
     assert "Unknown backend" in capsys.readouterr().err
     assert cli.main(["report", str(tmp_path / "empty")]) == 1
     assert "No results" in capsys.readouterr().err
+
+
+SHOP_TARGETS = {"SHOP-4", "SHOP-5", "SHOP-6", "OPS-1", "HD-2"}
+SHOP_CITED = {"SHOP-4", "SHOP-5", "OPS-1", "HD-2"}
+
+
+def platform_config(store, default="shop", platforms=("shop", "shop", "legacy")):
+    names = ("acme-jira", "acme-hd", "legacy-jira")
+    sources = [
+        SourceConfig(name=name, type="jira", options={}, platform=platform)
+        for name, platform in zip(names, platforms, strict=True)
+    ]
+    return Config(
+        index_path=store.path,
+        embedding=EmbeddingConfig(),
+        sources=sources,
+        default_platform=default,
+    )
+
+
+@pytest.fixture
+def run_on(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("agent_harness.cli.build_searcher", lambda config, store: _searcher(store))
+    runs = itertools.count()
+
+    def go(config, *extra, out=None):
+        monkeypatch.setattr("agent_harness.cli.load_config", lambda path: config)
+        out = out or tmp_path / f"run-{next(runs)}"
+        base = ["run", "--out", str(out), "--from", "2026-01-01", "--to", "2027-01-01"]
+        code = cli.main([*base, "--variants", "recent-median", *extra])
+        err = capsys.readouterr().err
+        if code != 0:
+            return code, err, []
+        return code, err, load_records(run_file(out, "recent-median"))
+
+    return go
+
+
+@pytest.mark.parametrize(
+    ("default", "extra", "line", "keys", "cited"),
+    [
+        ("shop", [], "platform shop: 5 tickets", SHOP_TARGETS, SHOP_CITED),
+        (None, ["--platform", "shop"], "platform shop: 5 tickets", SHOP_TARGETS, SHOP_CITED),
+        ("shop", ["--platform", "legacy"], "platform legacy: 1 tickets", {"LEG-2"}, set()),
+        (
+            "shop",
+            ["--platform", "all"],
+            "platform all: 6 tickets",
+            SHOP_TARGETS | {"LEG-2"},
+            SHOP_CITED | {"LEG-2"},
+        ),
+    ],
+)
+def test_cli_run_keeps_targets_and_neighbours_in_one_platform(
+    run_on, mixed_store, default, extra, line, keys, cited
+):
+    code, err, records = run_on(platform_config(mixed_store, default), *extra)
+
+    assert code == 0
+    assert line in err
+    assert {record.id.split("/")[1] for record in records} == keys
+    assert {key for record in records for key in record.cited} == cited
+
+
+def test_cli_run_rejects_an_unknown_platform(run_on, mixed_store):
+    code, err, _ = run_on(platform_config(mixed_store), "--platform", "nope")
+
+    assert code == 1
+    assert "Unknown platform 'nope'; configured: ['legacy', 'shop']" in err
+
+
+def test_cli_run_does_not_mix_platforms_unless_asked(run_on, mixed_store):
+    code, err, _ = run_on(platform_config(mixed_store, default=None))
+
+    assert code == 1
+    assert "No platform chosen" in err
+    assert "--platform" in err
+
+
+def test_cli_run_without_platforms_uses_every_source(run_on, mixed_store):
+    code, err, records = run_on(platform_config(mixed_store, None, platforms=(None, None, None)))
+
+    assert code == 0
+    assert "platform all: 6 tickets" in err
+    assert len(records) == 6
+
+
+def test_a_run_writes_its_manifest_and_resumes_under_it(run_on, mixed_store, tmp_path):
+    out = tmp_path / "resumed"
+    config = platform_config(mixed_store)
+
+    first_code, _, first_records = run_on(config, out=out)
+    manifest = json.loads((out / "manifest.json").read_text())
+    code, err, records = run_on(config, out=out)
+
+    assert first_code == 0
+    assert manifest == {
+        "platform": "shop",
+        "sources": ["acme-hd", "acme-jira"],
+        "index_path": str(mixed_store.path.resolve()),
+    }
+    assert code == 0
+    assert "warning" not in err
+    assert {(r.id, r.median) for r in records} == {(r.id, r.median) for r in first_records}
+
+
+@pytest.mark.parametrize("field", ["platform", "sources", "index_path"])
+def test_a_run_refuses_to_resume_under_another_platform_or_index(
+    run_on, mixed_store, tmp_path, field
+):
+    out = tmp_path / "resumed"
+    assert run_on(platform_config(mixed_store), out=out)[0] == 0
+    manifest = (out / "manifest.json").read_text()
+    changed = {
+        "platform": (platform_config(mixed_store), ["--platform", "all"]),
+        "sources": (platform_config(mixed_store, platforms=("shop", "legacy", "legacy")), []),
+        "index_path": (replace(platform_config(mixed_store), index_path=tmp_path / "b.db"), []),
+    }
+    config, extra = changed[field]
+
+    code, err, _ = run_on(config, *extra, out=out)
+
+    assert code == 1
+    assert f"{out} was run with {field} " in err
+    assert (out / "manifest.json").read_text() == manifest
+
+
+def test_a_run_directory_from_before_manifests_resumes_with_a_warning(
+    run_on, mixed_store, tmp_path
+):
+    out = tmp_path / "old-run"
+    out.mkdir()
+    (out / "human.jsonl").write_text("")
+
+    code, err, records = run_on(platform_config(mixed_store), out=out)
+
+    assert code == 0
+    assert f"warning: {out} has no manifest.json" in err
+    assert len([line for line in err.splitlines() if "warning" in line]) == 1
+    assert len(records) == len(SHOP_TARGETS)
+    assert not (out / "manifest.json").exists()
+
+
+def test_cli_gives_every_retrieving_variant_the_platform(store, tmp_path):
+    variants = "neighbour-median,recent-median,era-scaled-median,llm-hybrid,human"
+    args = run_args(tmp_path, "--variants", variants, "--backend", "ollama")
+    sources = frozenset({"acme-jira"})
+
+    estimators = cli.build_estimators(args, _searcher(store), sources)
+
+    retrieving = [e for e in estimators if isinstance(e, NeighbourMedian | LLMEstimator)]
+    assert len(retrieving) == 4
+    assert all(estimator.sources == sources for estimator in retrieving)
 
 
 def test_cli_builds_llm_variants_for_every_backend(store, tmp_path):

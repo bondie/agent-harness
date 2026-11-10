@@ -56,9 +56,10 @@ def ticket(
     description: str = EXPORT,
     status: str = "Done",
     project: str = "SHOP",
+    source: str = "acme-jira",
 ) -> Ticket:
     return Ticket(
-        source="acme-jira",
+        source=source,
         key=key,
         project=project,
         title=title,
@@ -86,6 +87,16 @@ TICKETS = [
     ticket("OPS-1", "2026-02-10", 0.5, "2026-02-11", project="OPS", title="Restart the queue"),
 ]
 
+SHOP_SOURCES = frozenset({"acme-jira", "acme-hd"})
+HELPDESK = [
+    ticket("HD-1", "2025-05-01", 3, "2025-05-02", project="HD", source="acme-hd"),
+    ticket("HD-2", "2026-01-15", 2.5, "2026-01-16", project="HD", source="acme-hd"),
+]
+LEGACY = [
+    ticket("LEG-1", "2025-02-01", 20, "2025-02-05", project="LEG", source="legacy-jira"),
+    ticket("LEG-2", "2026-01-20", 30, "2026-01-25", project="LEG", source="legacy-jira"),
+]
+
 
 @dataclass
 class ListConnector:
@@ -106,6 +117,21 @@ def store(tmp_path: Path) -> Iterator[Store]:
 @pytest.fixture
 def searcher(store: Store) -> Searcher:
     return Searcher(store, FakeEmbedder())
+
+
+@pytest.fixture
+def mixed_store(tmp_path: Path) -> Iterator[Store]:
+    store = Store(tmp_path / "mixed.db")
+    sync(store, FakeEmbedder(), ListConnector(TICKETS), "acme-jira", ChunkingConfig())
+    sync(store, FakeEmbedder(), ListConnector(HELPDESK), "acme-hd", ChunkingConfig())
+    sync(store, FakeEmbedder(), ListConnector(LEGACY), "legacy-jira", ChunkingConfig())
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def mixed_searcher(mixed_store: Store) -> Searcher:
+    return Searcher(mixed_store, FakeEmbedder())
 
 
 class GitRepo:

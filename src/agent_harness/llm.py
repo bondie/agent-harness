@@ -275,6 +275,7 @@ class LLMEstimator:
     context: str = "hybrid"
     k: int = 10
     since: str | None = None
+    sources: frozenset[str] | None = None
     process_note: str | None = None
     structured: bool = False
     memory: Memory | None = None
@@ -298,7 +299,9 @@ class LLMEstimator:
         if self.context != "none":
             mode = "bm25" if self.context == "keyword" else "hybrid"
             row = self.searcher.store.tickets_by_id([target.ticket_id])[target.ticket_id]
-            found = reference_for_ticket(self.searcher, row, self.k, self.since, mode=mode)
+            found = reference_for_ticket(
+                self.searcher, row, self.k, self.since, mode=mode, sources=self.sources
+            )
             reference = describe_reference(self.searcher, found)
             median = found.summary()["median_hours"]
         message, redacted = ticket_message(target, reference, self.process_note)
