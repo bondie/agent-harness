@@ -342,3 +342,77 @@ def test_the_hook_is_registered_for_its_events():
     for name in ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd"):
         commands = [hook["command"] for entry in hooks[name] for hook in entry["hooks"]]
         assert any("session_state.py" in command for command in commands), name
+
+
+def agent_file(home: Path, agent: str = "a-1") -> Path:
+    return home / "agents" / "s-1" / f"{agent}.json"
+
+
+def subagent(name: str, repo: Path, agent: str = "a-1", **extra: Any) -> dict[str, Any]:
+    return event(name, repo, agent_id=agent, agent_type="agent-harness:reviewer-qa", **extra)
+
+
+def test_a_subagent_file_lives_from_start_to_stop_and_counts_its_calls(repo, home, environ):
+    session_state.record(subagent("SubagentStart", repo), environ, now=START)
+    session_state.record(subagent("PreToolUse", repo, tool_name="Read"), environ, now=START + 5)
+    session_state.record(subagent("PostToolUse", repo, tool_name="Read"), environ, now=START + 6)
+    session_state.record(subagent("PreToolUse", repo, tool_name="Bash"), environ, now=START + 9)
+    running = json.loads(agent_file(home).read_text(encoding="utf-8"))
+    session_state.record(subagent("SubagentStop", repo), environ, now=START + 30)
+
+    assert running["agent_type"] == "agent-harness:reviewer-qa"
+    assert running["started_epoch"] == START
+    assert (running["tool_calls"], running["last_tool"]) == (2, "Bash")
+    assert running["updated_epoch"] == START + 9
+    assert not agent_file(home).exists()
+
+
+def test_a_tool_call_of_an_unknown_subagent_creates_no_file(repo, home, environ):
+    session_state.record(subagent("PreToolUse", repo, tool_name="Read"), environ, now=START)
+
+    assert not (home / "agents").exists()
+
+
+def test_parallel_subagents_keep_their_own_files(repo, home, environ):
+    for agent in ("a-1", "a-2"):
+        session_state.record(subagent("SubagentStart", repo, agent=agent), environ, now=START)
+    session_state.record(
+        subagent("PreToolUse", repo, agent="a-2", tool_name="Grep"), environ, now=START + 1
+    )
+
+    first = json.loads(agent_file(home, "a-1").read_text(encoding="utf-8"))
+    second = json.loads(agent_file(home, "a-2").read_text(encoding="utf-8"))
+    assert (first["tool_calls"], second["tool_calls"]) == (0, 1)
+
+
+def test_session_start_removes_the_agents_of_ended_sessions(repo, home, environ):
+    session_state.record(subagent("SubagentStart", repo), environ, now=START)
+    gone = home / "agents" / "gone"
+    gone.mkdir(parents=True)
+    (gone / "a-9.json").write_text("{}")
+    session_state.record(event("SessionStart", repo), environ, now=START + 1)
+
+    assert agent_file(home).exists()
+    assert not gone.exists()
+
+
+def test_the_runaway_guard_counts_a_subagent_call(repo, home, environ):
+    session_state.record(subagent("SubagentStart", repo), environ, now=START)
+    payload = json.dumps(subagent("PreToolUse", repo, tool_name="Edit", tool_input={}))
+    subprocess.run(  # noqa: S603
+        [sys.executable, str(HOOKS / "guard_runaway.py")],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **environ},
+        check=False,
+    )
+
+    assert json.loads(agent_file(home).read_text(encoding="utf-8"))["tool_calls"] == 1
+
+
+def test_the_hook_is_registered_for_subagent_start_and_stop():
+    hooks = json.loads((HOOKS / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    for name in ("SubagentStart", "SubagentStop"):
+        commands = [hook["command"] for entry in hooks[name] for hook in entry["hooks"]]
+        assert any("session_state.py" in command for command in commands), name
