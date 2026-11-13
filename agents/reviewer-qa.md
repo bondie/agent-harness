@@ -23,8 +23,18 @@ what would hurt in production or in the next change, not to restate the diff.
    `git diff <base>...<head>`, and `git show <head>:<path>` or `git grep <pattern> <head>` for
    context. Otherwise review the uncommitted changes (`git diff`, `git status` for new files).
    Then read the surrounding code of every hunk: a change is only correct in its context.
+   **Size the review to the change.** A small change is at most about 30 changed lines in at
+   most 3 files, with no change to a public API, a schema, configuration, security or a shared
+   package. For a small change, stay within about 15 tool calls: read the diff and the code
+   around it, run only the checks that cover the changed files, go through only the
+   review-skill items the diff touches and answer the questions in the request. Open no new
+   investigation (vendor code, other callers, extra screen sizes or data sets) unless a
+   concrete defect points there. Under Checks, say what you skipped because the change is
+   small.
 2. **Check it against the analysis.** Every acceptance criterion must be met by the code and
-   covered by a test. A criterion without a test is a finding.
+   covered by a test. A criterion without a test is a finding, except for a presentational
+   change (styles, markup) that no test in the project could cover: mark that criterion
+   `untested` and report no finding.
 3. **Look for defects:** wrong conditions, missing null or empty handling, off-by-one, broken
    transactions, N+1 queries, changed public behaviour, missing migrations or configuration,
    security problems (injection, missing authorisation, secrets in code).

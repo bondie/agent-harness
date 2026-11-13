@@ -72,7 +72,11 @@ checks passed. The plugin keeps every agent's report and structured block in
 
 ## 5. Review
 
-Run the `reviewer-qa` subagent ("SHOP-412: review the change. …"). When it requests
+Run the `reviewer-qa` subagent ("SHOP-412: review the change. …"). Give it the facts you
+have verified and the concrete points to check, not open research questions: what a few
+commands answer (where something is defined, who calls it), find out before you brief it. For
+a small change (a few files, no logic, no API or schema change), start it with
+`effort: medium`; it runs at `xhigh` otherwise. When it requests
 changes, send the findings to the `implementer` ("SHOP-412: fix these review findings. …")
 and review again; after two rounds, stop and show the person what is left. Each round keeps
 its own review block for the retro.
