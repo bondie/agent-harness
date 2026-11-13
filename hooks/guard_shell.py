@@ -15,6 +15,7 @@ DROP/TRUNCATE in or piped into a database client command, and a `$(` never close
 writes and Write/Edit/MultiEdit/NotebookEdit calls that change Claude Code settings, the
 guard's own settings, git hooks or installed plugins are denied too, as is `core.hooksPath`;
 the agent types in `tampering_allow_agents` may change the user's Claude Code settings.json.
+Writes to the permission bridge's folder are denied in every session, the main one included.
 Each denial appends a line without the command to `$HARNESS_HOME/guard-events.jsonl`.
 Settings: built-in defaults, then `$HARNESS_HOME/guard.json` (default
 `~/.claude/agent-harness/guard.json`), then the `guard` key of the project's
@@ -991,7 +992,14 @@ def live_guards(environ: Mapping[str, str]) -> list[str]:
     config = claude_config_dir(environ)
     files = [(str(harness_home(environ)), name) for name in ("guard.json", "memory.json")]
     files += [(config, name) for name in ("settings.json", "plugins", "plugins/*")]
-    return [str(PurePath(glob.escape(os.path.realpath(d)), name)).lower() for d, name in files]
+    globs = [str(PurePath(glob.escape(os.path.realpath(d)), name)).lower() for d, name in files]
+    return globs + bridge_guards(environ)
+
+
+def bridge_guards(environ: Mapping[str, str]) -> list[str]:
+    """Globs of the permission bridge's folder, where a decision file answers a prompt."""
+    folder = PurePath(glob.escape(os.path.realpath(harness_home(environ))), "permissions")
+    return [str(folder).lower(), str(folder / "*").lower()]
 
 
 def user_settings(environ: Mapping[str, str]) -> list[str]:
@@ -1054,6 +1062,7 @@ class Checker:
         project: str | None = None,
         may_change_user_settings: bool = False,
         may_write_git: bool = False,
+        bridge_only: bool = False,
     ) -> None:
         self.config = config
         self.environ = environ
@@ -1063,11 +1072,15 @@ class Checker:
         self.stack: list[tuple[list[str | None], list[str | None]]] = []
         self.subagent = subagent
         self.project = os.path.realpath(project) if project else None
-        self.live = live_guards(environ)
+        self.bridge_only = bridge_only
+        self.live = bridge_guards(environ) if bridge_only else live_guards(environ)
+        self.repo_guards = [] if bridge_only else REPO_GUARDS
         self.own_settings = user_settings(environ) if may_change_user_settings else []
         self.git_writes = subagent and not may_write_git
 
     def script(self, text: str, depth: int = 0) -> Denial | None:
+        if depth > MAX_DEPTH and self.bridge_only:
+            return None
         if depth > MAX_DEPTH:
             return Denial(
                 "nesting",
@@ -1076,7 +1089,7 @@ class Checker:
             )
         lexer = Lexer(text)
         items = commands(lexer.run())
-        if lexer.unclosed:
+        if lexer.unclosed and not self.bridge_only:
             return Denial(
                 "unparsable",
                 "a `$(` in the command is never closed, so the rest of it cannot be checked",
@@ -1110,7 +1123,7 @@ class Checker:
             return None
         call = unwrap(item.words)
         denial = self.redirects(call, item, items, index)
-        if denial is None and call is None and bare_env(item.words):
+        if denial is None and call is None and bare_env(item.words) and not self.bridge_only:
             denial = self.environment(" ".join(item.words), items, index)
         if denial is None and call is not None:
             denial = self.call(call, item, items, index, depth)
@@ -1130,7 +1143,7 @@ class Checker:
         if name == "eval":
             return self.subshell(" ".join(call.args), depth + 1)
         changed = self.tamper_denial(f"`{name}`", changed_paths(call))
-        if changed:
+        if changed or self.bridge_only:
             return changed
         if name == "rm":
             return self.rm(call, items, index)
@@ -1155,7 +1168,7 @@ class Checker:
     ) -> Denial | None:
         written = [target for op, target in command.redirects if op in WRITES]
         denial = self.tamper_denial("a `>` redirect", written)
-        if denial is not None:
+        if denial is not None or self.bridge_only:
             return denial
         if call is not None and call.program in READERS:
             return None
@@ -1178,7 +1191,7 @@ class Checker:
         return Denial(
             "guard-tampering",
             f"{how} would change {target}, which holds Claude Code settings, the guard's "
-            "configuration, a git hook or an installed plugin",
+            "configuration, a git hook, an installed plugin or a permission request",
             TAMPER_PROCEED,
         )
 
@@ -1193,7 +1206,8 @@ class Checker:
         candidates = [c for c in candidates if not any(fnmatchcase(c, p) for p in own)]
         if any(fnmatchcase(c, pattern) for c in candidates for pattern in self.live):
             return True
-        if not any(fnmatchcase("/" + c, pattern) for c in candidates for pattern in REPO_GUARDS):
+        repo = self.repo_guards
+        if not any(fnmatchcase("/" + c, pattern) for c in candidates for pattern in repo):
             return False
         # A link is live where it lies, not where it points; its dir may be a link (/tmp on macOS).
         links = [resolved_dir(path) for path in lexical]
@@ -1689,14 +1703,17 @@ def check(event: dict[str, Any], environ: Mapping[str, str]) -> tuple[Denial | N
     config = load_config(environ, Path(project_dir) if project_dir else None)
     agent = event.get("agent_type")
     subagent = bool(agent)
-    if config.scope != "all" and not subagent:
-        return None, config.warnings
+    bridge_only = config.scope != "all" and not subagent
     exempt = isinstance(agent, str) and agent in config.tampering_allow_agents
     writer = isinstance(agent, str) and agent in config.git_write_allow_agents
-    checker = Checker(config, environ, cwd or project_dir, subagent, project_dir, exempt, writer)
+    checker = Checker(
+        config, environ, cwd or project_dir, subagent, project_dir, exempt, writer, bridge_only
+    )
     if tool != "Bash":
         return checker.tamper_denial(f"`{tool}`", [command]), config.warnings
     denial = checker.script(command)
+    if bridge_only:
+        return denial, config.warnings
     for pattern, reason in config.extra_deny:
         if denial is None and pattern.search(command):
             denial = Denial(

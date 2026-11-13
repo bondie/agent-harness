@@ -54,7 +54,7 @@ its own marketplace.
 | `hooks/quality_gate.py` | When **the implementer** finishes or hands its report back, runs the repository's configured checks on the files it changed and sends it back to fix a failure. |
 | `hooks/guard_memory_writes.py` | Lets the analyst, the estimator and the reviewer write only to their own memory directory, and holds all four agents' Write and Edit calls in their memory to the lesson format and a size cap ([Memory hygiene](#memory-hygiene)). A write through Bash does not pass it. |
 | `hooks/memory_cap.py` | Records the sizes of the four agents' memory files when a run starts or resumes; when the agent stops or hands its report back, sends it back once if the run grew one of them over its size cap, whatever tool wrote it. After a Write or Edit that grows one of them to `warn_ratio` (80 %) of its cap, tells the agent once per file and run to move whole lessons verbatim into a topic file, or in a retro run to propose the moves ([Memory hygiene](#memory-hygiene)). |
-| `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets, touch a production database or write to the git history, the remote or the forge (commits, pushes, merge requests: the team lead's), and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
+| `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets, touch a production database or write to the git history, the remote or the forge (commits, pushes, merge requests: the team lead's), and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins; in every session, also the main one, writes to the permission bridge's folder ([rules](#shell-guard)). |
 | `hooks/guard_runaway.py` | Stops a subagent that repeats the same call or keeps failing, and once tells one that has run long to report ([rules](#runaway-guard)). |
 | `hooks/session_state.py` | Keeps the state of each main session (working, waiting for an answer or a permission, idle) in `~/.claude/agent-harness/sessions/<session>.json` for a viewer ([Session state](#session-state)). |
 | `hooks/permission_bridge.py` | Off by default. Lets a session viewer answer a permission prompt while it shows in the terminal; whichever answers first applies ([Permission bridge](#permission-bridge)). |
@@ -182,7 +182,7 @@ end-to-end run of the handback path, because auto mode cannot be scripted with `
 ## Shell guard
 
 `hooks/guard_shell.py` checks each Bash command of a subagent before it runs, or of every
-session with `"scope": "all"`. It parses the command, so it also sees `;`/`&&`/`||` chains,
+session with `"scope": "all"`; writes to the permission bridge's folder it denies in every session. It parses the command, so it also sees `;`/`&&`/`||` chains,
 pipes, subshells, `$(…)`, `bash -c`/`sh -c`, `eval`, heredocs fed to a shell, `sudo`, `env`,
 `nohup` and `timeout` prefixes, variable assignments, quoting tricks and absolute binary paths.
 It also checks the Write, Edit, MultiEdit and NotebookEdit calls of the same agents against the
@@ -237,13 +237,18 @@ link is matched by its own path as well as by the file it points to. The agent t
 `tampering_allow_agents` may change the user's `settings.json`, and no other guard file; the
 default is Claude Code's built-in `statusline-setup`, which exists to edit that file.
 
+The permission bridge's folder, `permissions/` in `$HARNESS_HOME`, and everything in it are a
+guard file in every session: under `"scope": "subagents"` the main session is checked for this
+rule alone, since an agent that writes a decision file answers its own permission prompt or one
+of a subagent running in the background ([Permission bridge](#permission-bridge)).
+
 The settings merge built-in defaults, `~/.claude/agent-harness/guard.json` (under
 `$HARNESS_HOME` when set) and the `guard` key of the project's `.claude/agent-harness.json`.
 Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the last value.
 
 | Key | Default |
 |---|---|
-| `scope` | `"subagents"`: only events with an `agent_type`; `"all"` checks the main session too |
+| `scope` | `"subagents"`: only events with an `agent_type`, apart from the permission bridge's folder; `"all"` checks the main session too |
 | `allow_force_with_lease` | `"main"`: the main agent only; `true` or `false` for everyone, but a subagent pushes with a lease only when its type is also in `git_write_allow_agents` |
 | `secret_globs` | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `credentials`, `credentials.json`, `*credentials.y*ml`, `.aws/credentials`, `*.credentials`, `auth.json` |
 | `secret_allow_globs` | `.env.example`, `.env.dist`, `*.pub` |
@@ -464,7 +469,10 @@ until the prompt is answered) and waits for `permissions/<id>.decision.json`:
 {"behavior": "deny", "message": "Not now."}
 ```
 
-A decision counts only from a regular file of the same user, not through a symlink. When the
+A decision counts only from a regular file of the same user, not through a symlink. Agents run
+as that user, so the shell guard denies every session's shell and file-tool writes to the folder
+(`guard-tampering`); a write the guard does not parse, such as one from inside an interpreter's
+script, still reaches it, so turn the bridge on only where you accept that. When the
 person answers in the terminal first, `session_state.py` removes the request once the call ran
 (the same tool and input) or the turn ended, and the hook stops waiting. Without a decision
 within `wait_seconds` the hook returns nothing and the prompt stays in the terminal. An allow

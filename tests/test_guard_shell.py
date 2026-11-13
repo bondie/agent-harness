@@ -1045,6 +1045,112 @@ def test_file_tools_follow_the_scope(tmp_path):
     )
 
 
+BRIDGE = "/work/no-harness-home/permissions"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'echo \'{{"behavior": "allow"}}\' > {BRIDGE}/r1.decision.json',
+        f"printf x >> {BRIDGE}/r1.json",
+        f"cp /work/shop/allow.json {BRIDGE}/r1.decision.json",
+        f"cp allow.json {BRIDGE}",
+        f"cp -t {BRIDGE} allow.json",
+        f"mv /sandbox/tmp/allow.json {BRIDGE}/r1.decision.json",
+        f"tee {BRIDGE}/r1.decision.json",
+        f"ln -s /work/shop/allow.json {BRIDGE}/r1.decision.json",
+        f"ln -sfn /sandbox/tmp/elsewhere {BRIDGE}",
+        f"mv {BRIDGE} /sandbox/tmp/old",
+        f"rm -rf {BRIDGE}",
+        f"rm {BRIDGE}/r1.json",
+        f"chmod 777 {BRIDGE}",
+        f"bash -c 'echo x > {BRIDGE}/r1.decision.json'",
+        f"cd {BRIDGE} && echo x > r1.decision.json",
+        "cd /work/no-harness-home && cp allow.json permissions/r1.decision.json",
+        "echo x > $HARNESS_HOME/permissions/r1.decision.json",
+    ],
+)
+@pytest.mark.parametrize("agent", [SUBAGENT, None])
+def test_the_permission_bridge_folder_is_protected_from_every_session(command, agent):
+    assert rule(command, agent=agent) == "guard-tampering"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"rm -rf /work/shop/src && echo x > {BRIDGE}/r1.decision.json",
+        f"cat .env; echo x > {BRIDGE}/r1.decision.json",
+        f"echo x > {BRIDGE}/r1.decision.json; echo $(date",
+    ],
+)
+def test_other_rules_do_not_hide_the_bridge_rule_in_the_main_session(command):
+    assert rule(command, agent=None) == "guard-tampering"
+    assert rule(command) is not None
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit"])
+@pytest.mark.parametrize("agent", [SUBAGENT, None])
+def test_file_tools_cannot_answer_a_permission_request(tool, agent):
+    assert file_tool(tool, f"{BRIDGE}/r1.decision.json", agent=agent) == "guard-tampering"
+    assert file_tool(tool, f"{BRIDGE}/r1.json", agent=agent) == "guard-tampering"
+
+
+def test_the_bridge_folder_follows_a_custom_and_the_default_harness_home(monkeypatch):
+    command = "echo x > /work/custom/permissions/r1.decision.json"
+    assert rule(command) is None
+    assert rule(command, agent=None, HARNESS_HOME="/work/custom") == "guard-tampering"
+    monkeypatch.setenv("HOME", "/work/home")
+    env = {key: value for key, value in ENV.items() if key != "HARNESS_HOME"}
+    event: dict[str, Any] = {
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo x > ~/.claude/agent-harness/permissions/r1.decision.json"},
+        "cwd": "/work/shop",
+    }
+    verdict = guard_shell.decision(event, env)
+    assert verdict is not None
+    assert "rule guard-tampering" in verdict["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"ls {BRIDGE}",
+        f"cat {BRIDGE}/r1.json",
+        f"cp {BRIDGE}/r1.json /sandbox/tmp/r1.json",
+        "echo x > /work/no-harness-home/sessions/s1.json",
+        "echo x >> /work/no-harness-home/runs.jsonl",
+        "echo x > /work/no-harness-home/permissions-notes.txt",
+    ],
+)
+@pytest.mark.parametrize("agent", [SUBAGENT, None])
+def test_reads_of_the_bridge_and_other_harness_files_are_allowed(command, agent):
+    assert rule(command, agent=agent) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf src",
+        "cat .env",
+        "git push --force",
+        "git commit -m x",
+        "echo '{}' > .claude/settings.json",
+        "echo x > /work/no-harness-home/guard.json",
+        "git config core.hooksPath /sandbox/tmp/hooks",
+        "env",
+        "echo $(date",
+        "bash -c " * 12 + "ls",
+    ],
+)
+def test_the_main_session_keeps_only_the_bridge_rule_under_scope_subagents(command):
+    assert rule(command, agent=None) is None
+
+
+def test_the_main_session_file_tools_keep_only_the_bridge_rule():
+    assert file_tool("Write", "/work/no-harness-home/guard.json", agent=None) is None
+    assert file_tool("Edit", ".git/hooks/pre-commit", agent=None) is None
+
+
 STATUSLINE = "statusline-setup"
 
 
