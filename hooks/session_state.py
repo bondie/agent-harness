@@ -11,8 +11,10 @@ permission prompt, `detail` holds its message) and `idle` (the turn ended, or th
 idle long enough for Claude Code's `idle_prompt`). A subagent's tool event only ends a wait
 its own prompt started (or a wait of unknown origin); a compaction keeps the state. SessionEnd
 removes the file; a session that ended without it is left for the viewer to drop by its `pid`,
-and the next SessionStart removes it (one without a `pid` after a day). Standard library only;
-an internal error is printed to stderr and never blocks anything.
+and the next SessionStart removes it (one without a `pid` after a day). Each running subagent
+also gets `$HARNESS_HOME/agents/<session>/<agent>.json` (type, start, tool calls, last tool)
+from SubagentStart to SubagentStop; the cleanup of a session removes its agents too. Standard
+library only; an internal error is printed to stderr and never blocks anything.
 """
 
 from __future__ import annotations
@@ -46,10 +48,57 @@ def harness_home(environ: Mapping[str, str]) -> str:
 
 
 def state_path(event: Mapping[str, Any], environ: Mapping[str, str]) -> str | None:
-    session = event.get("session_id")
-    if not isinstance(session, str) or not session or UNSAFE & set(session) or session[0] == ".":
+    session = safe(event.get("session_id"))
+    if session is None:
         return None
     return os.path.join(harness_home(environ), "sessions", f"{session}.json")
+
+
+def safe(name: Any) -> str | None:
+    if not isinstance(name, str) or not name or UNSAFE & set(name) or name[0] == ".":
+        return None
+    return name
+
+
+def agent_path(event: Mapping[str, Any], environ: Mapping[str, str]) -> str | None:
+    session, agent = safe(event.get("session_id")), safe(event.get("agent_id"))
+    if session is None or agent is None:
+        return None
+    return os.path.join(harness_home(environ), "agents", session, f"{agent}.json")
+
+
+def track_agent(event: Mapping[str, Any], environ: Mapping[str, str], moment: float) -> None:
+    """Keep the file of a running subagent: created on its start, counted on its tool calls."""
+    path = agent_path(event, environ)
+    name = event.get("hook_event_name")
+    if path is None or name not in ("SubagentStart", "SubagentStop", "PreToolUse"):
+        return
+    if name == "SubagentStop":
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    data = read(path)
+    if name == "PreToolUse" and not data:
+        return
+    if name == "SubagentStart":
+        agent_type = event.get("agent_type")
+        data = {
+            "version": VERSION,
+            "agent_id": event.get("agent_id"),
+            "agent_type": agent_type if isinstance(agent_type, str) else None,
+            "session_id": event.get("session_id"),
+            "started_at": stamp(moment),
+            "started_epoch": moment,
+            "tool_calls": 0,
+            "last_tool": None,
+        }
+    if name == "PreToolUse":
+        tool = event.get("tool_name")
+        data["tool_calls"] = int(data.get("tool_calls") or 0) + 1
+        data["last_tool"] = tool if isinstance(tool, str) else None
+    data["updated_at"] = stamp(moment)
+    data["updated_epoch"] = moment
+    write(path, data)
 
 
 def transition(
@@ -195,6 +244,14 @@ def remove_dead(path: str, moment: float) -> None:
                 os.remove(other)
             except FileNotFoundError:
                 continue
+    agents = os.path.join(os.path.dirname(directory), "agents")
+    if not os.path.isdir(agents):
+        return
+    import shutil
+
+    for session in os.listdir(agents):
+        if not os.path.exists(os.path.join(directory, f"{session}.json")):
+            shutil.rmtree(os.path.join(agents, session), ignore_errors=True)
 
 
 def stamp(moment: float) -> str:
@@ -228,6 +285,9 @@ def record(
         return None
     name = event.get("hook_event_name")
     agent = event.get("agent_id") or None
+    moment = time.time() if now is None else now
+    if agent:
+        track_agent(event, environ, moment)
     if name == "SessionEnd":
         if not agent and os.path.exists(path):
             os.remove(path)
@@ -237,7 +297,6 @@ def record(
     if found is None:
         return None
     state, detail = found
-    moment = time.time() if now is None else now
     same_state = previous.get("state") == state
     unchanged = same_state and previous.get("detail") == detail
     if unchanged and moment - float(previous.get("updated_epoch") or 0) < SAME_STATE_SECONDS:
