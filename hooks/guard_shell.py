@@ -77,7 +77,7 @@ LIST_KEYS = {
 }
 REGEX_KEYS = {"prod_db_hosts", "safe_filters"}
 # Settings of other guard hooks that share this config; they validate their own.
-OTHER_HOOK_KEYS = {"runaway"}
+OTHER_HOOK_KEYS = {"runaway", "permission_bridge"}
 DEFAULT_RM_DIRS = ["node_modules", "var/cache", "dist", "build", "coverage", ".pytest_cache"]
 DEFAULT_RM_DIRS += ["__pycache__", ".mypy_cache", ".ruff_cache"]
 SCRATCHPADS = ["/tmp/claude-*", "/private/tmp/claude-*"]  # noqa: S108
