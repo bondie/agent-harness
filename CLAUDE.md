@@ -1,7 +1,7 @@
 # agent-harness
 
 A Claude Code plugin (four subagents, the `ticket`, `retro` and `stats` skills, a dynamic
-workflow, ten hook scripts, an MCP server entry) and the Python package that backtests its
+workflow, eleven hook scripts, an MCP server entry) and the Python package that backtests its
 estimator and measures the team.
 
 ## Layout
@@ -19,6 +19,9 @@ estimator and measures the team.
   `save_artifacts.py`, `quality_gate.py`, `estimate_check.py` and `memory_cap.py`
   (SubagentStop). The last three also run as PreToolUse on `SubagentHandback`, where auto mode
   delivers a report before the subagent stops; both paths share one block count per run.
+  `session_state.py` (SessionStart, UserPromptSubmit, Notification, Stop, SessionEnd) keeps a
+  state file per main session for a viewer; `guard_runaway.py` updates it on the main session's
+  tool calls, so that module stays on `os.path` and the main-session path imports nothing heavy.
   `memory_cap.py` also runs on SubagentStart, where it records the sizes it measures growth from,
   and as PostToolUse on Write and Edit, where it warns once per file and run when a write brings
   a memory file near its cap (`warn_ratio`).

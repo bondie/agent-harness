@@ -18,8 +18,10 @@ Settings: `runaway` in `$HARNESS_HOME/guard.json`, then in the `guard` key of th
 `.claude/agent-harness.json`; 0 turns a rule off. State per agent lives in
 `$HARNESS_HOME/runaway/<session>/<agent>.json` and holds hashes, not inputs. Each deny and
 reminder appends a line without the tool input to `$HARNESS_HOME/guard-events.jsonl`. The
-rules are adapted from the MIT-licensed runaway-guard skill. Standard library only; on an
-internal error it allows the call and logs to stderr.
+rules are adapted from the MIT-licensed runaway-guard skill. A main-session event is passed to
+`session_state.record`, so the tool calls of the main session update its state file without a
+second process. Standard library only; on an internal error it allows the call and logs to
+stderr.
 """
 
 from __future__ import annotations
@@ -386,6 +388,15 @@ def decision(
     return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": text}}
 
 
+def record_session(event: dict[str, Any], environ: Mapping[str, str]) -> None:
+    try:
+        from session_state import record
+
+        record(event, environ)
+    except Exception as error:
+        print(f"guard_runaway.py could not record the session state: {error!r}", file=sys.stderr)
+
+
 def main(
     stdin: TextIO = sys.stdin,
     stdout: TextIO = sys.stdout,
@@ -393,6 +404,14 @@ def main(
 ) -> int:
     try:
         event = json.load(stdin)
+    except Exception as error:
+        print(
+            f"guard_runaway.py allowed the call after an internal error: {error!r}", file=sys.stderr
+        )
+        return 0
+    if isinstance(event, dict) and not event.get("agent_id"):
+        record_session(event, environ)
+    try:
         verdict = decision(event, environ) if isinstance(event, dict) else None
     except Exception as error:
         print(
