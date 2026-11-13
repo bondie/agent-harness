@@ -436,8 +436,10 @@ From SubagentStart to SubagentStop each subagent has `agents/<session>/<agent>.j
 {"version": 1, "agent_id": "<agent_id>", "agent_type": "agent-harness:reviewer-qa", "session_id": "<session_id>", "started_at": "2026-11-13T15:40:02Z", "started_epoch": 1794584402.1, "tool_calls": 47, "last_tool": "Bash", "updated_at": "2026-11-13T15:52:10Z", "updated_epoch": 1794585130.4}
 ```
 
-A viewer can compare the time it has run with the agent type's median in `runs.jsonl`. When a
-session's file is removed, the next SessionStart removes that session's agents too.
+A viewer can compare the time it has run with the agent type's median in `runs.jsonl`.
+`tool_calls` is approximate: parallel calls of one agent count without a lock and may lose an
+increment. SessionStart removes the agents of a session it finds ended, and any agent folder
+whose files have not changed for a day (an agent whose SubagentStop never came).
 
 ## Guard events
 

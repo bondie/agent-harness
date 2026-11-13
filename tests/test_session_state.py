@@ -387,13 +387,24 @@ def test_parallel_subagents_keep_their_own_files(repo, home, environ):
 
 def test_session_start_removes_the_agents_of_ended_sessions(repo, home, environ):
     session_state.record(subagent("SubagentStart", repo), environ, now=START)
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "gone.json").write_text(json.dumps({"pid": 2**22 + 12345}))
     gone = home / "agents" / "gone"
     gone.mkdir(parents=True)
-    (gone / "a-9.json").write_text("{}")
+    (gone / "a-9.json").write_text(json.dumps({"updated_epoch": START}))
+    unknown = home / "agents" / "no-session-file"
+    unknown.mkdir(parents=True)
+    (unknown / "a-8.json").write_text(json.dumps({"updated_epoch": START}))
+    forgotten = home / "agents" / "forgotten"
+    forgotten.mkdir(parents=True)
+    (forgotten / "a-7.json").write_text(json.dumps({"updated_epoch": START - 2 * 24 * 3600}))
     session_state.record(event("SessionStart", repo), environ, now=START + 1)
 
     assert agent_file(home).exists()
     assert not gone.exists()
+    assert unknown.exists()
+    assert not forgotten.exists()
 
 
 def test_the_runaway_guard_counts_a_subagent_call(repo, home, environ):

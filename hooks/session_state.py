@@ -235,23 +235,32 @@ def ended(data: Mapping[str, Any], moment: float) -> bool:
     return not isinstance(updated, (int, float)) or moment - updated > STALE_SECONDS
 
 
+def stale(path: str, moment: float) -> bool:
+    updated = read(path).get("updated_epoch")
+    return not isinstance(updated, (int, float)) or moment - updated > STALE_SECONDS
+
+
 def remove_dead(path: str, moment: float) -> None:
     directory = os.path.dirname(path)
+    agents = os.path.join(os.path.dirname(directory), "agents")
+    dead = set()
     for name in os.listdir(directory):
         other = os.path.join(directory, name)
         if name.endswith(".json") and other != path and ended(read(other), moment):
+            dead.add(name.removesuffix(".json"))
             try:
                 os.remove(other)
             except FileNotFoundError:
                 continue
-    agents = os.path.join(os.path.dirname(directory), "agents")
     if not os.path.isdir(agents):
         return
     import shutil
 
     for session in os.listdir(agents):
-        if not os.path.exists(os.path.join(directory, f"{session}.json")):
-            shutil.rmtree(os.path.join(agents, session), ignore_errors=True)
+        folder = os.path.join(agents, session)
+        files = [os.path.join(folder, name) for name in os.listdir(folder)]
+        if session in dead or all(stale(file, moment) for file in files):
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 def stamp(moment: float) -> str:
