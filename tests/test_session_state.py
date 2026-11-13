@@ -115,6 +115,15 @@ def test_an_idle_prompt_ends_a_turn_interrupted_without_stop(repo, home, environ
     assert (state_file(home)["state"], state_file(home)["detail"]) == ("idle", None)
 
 
+def test_an_idle_prompt_does_not_hide_an_open_question(repo, home, environ):
+    session_state.record(event("PreToolUse", repo, tool_name="AskUserQuestion"), environ, now=START)
+    session_state.record(
+        event("Notification", repo, notification_type="idle_prompt"), environ, now=START + 90
+    )
+
+    assert state_file(home)["state"] == "waiting_answer"
+
+
 def test_a_compaction_keeps_the_state_of_a_working_session(repo, home, environ):
     session_state.record(event("PreToolUse", repo, tool_name="Bash"), environ, now=START)
     session_state.record(event("SessionStart", repo, source="compact"), environ, now=START + 9)

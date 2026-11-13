@@ -412,7 +412,7 @@ permission prompt: its prompt makes the session wait, and its next tool call end
 | `working` | UserPromptSubmit, and every tool call | the tool |
 | `waiting_answer` | a question (AskUserQuestion), a plan to approve (ExitPlanMode), an elicitation dialog | the tool |
 | `waiting_permission` | the `permission_prompt` notification, which Claude Code sends after about 6 seconds, also for a subagent's prompt (then `waiting_agent` holds its id) | its message |
-| `idle` | SessionStart (a compaction keeps the state), Stop, and the `idle_prompt` notification, which also ends a turn interrupted with Esc, where no Stop comes | `null` |
+| `idle` | SessionStart (a compaction keeps the state), Stop, and the `idle_prompt` notification (not over an open question or permission), which also ends a turn interrupted with Esc, where no Stop comes | `null` |
 
 There is no event when a permission is granted: the state stays `waiting_permission` until the
 tool call ends, so after a long command a viewer shows the wait for its whole run.

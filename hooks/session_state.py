@@ -79,7 +79,7 @@ def transition(
     if state is None:
         return None
     if state == "idle":
-        return state, None
+        return None if previous.get("state") in WAITING else (state, None)
     message = event.get("message")
     return state, message[:200] if isinstance(message, str) else None
 
