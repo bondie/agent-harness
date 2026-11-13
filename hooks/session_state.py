@@ -263,10 +263,12 @@ def read(path: str) -> dict[str, Any]:
 
 
 def write(path: str, data: dict[str, Any]) -> None:
+    """Write privately: `detail` can hold a command with a secret in it."""
     directory, name = os.path.split(path)
-    os.makedirs(directory, exist_ok=True)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
     temporary = os.path.join(directory, f".{name}.{os.getpid()}.tmp")
-    with open(temporary, "w", encoding="utf-8") as handle:
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     os.replace(temporary, path)
 
@@ -285,7 +287,11 @@ def stale(path: str, moment: float) -> bool:
 
 def remove_dead(path: str, moment: float) -> None:
     directory = os.path.dirname(path)
-    agents = os.path.join(os.path.dirname(directory), "agents")
+    home = os.path.dirname(directory)
+    agents = os.path.join(home, "agents")
+    for folder in (directory, agents):
+        if os.path.isdir(folder):
+            os.chmod(folder, 0o700)
     dead = set()
     for name in os.listdir(directory):
         other = os.path.join(directory, name)
@@ -295,6 +301,7 @@ def remove_dead(path: str, moment: float) -> None:
                 os.remove(other)
             except FileNotFoundError:
                 continue
+    remove_old_requests(os.path.join(home, "permissions"), dead, moment)
     if not os.path.isdir(agents):
         return
     import shutil
@@ -304,6 +311,22 @@ def remove_dead(path: str, moment: float) -> None:
         files = [os.path.join(folder, name) for name in os.listdir(folder)]
         if session in dead or all(stale(file, moment) for file in files):
             shutil.rmtree(folder, ignore_errors=True)
+
+
+def remove_old_requests(directory: str, dead: set[str], moment: float) -> None:
+    """Drop permission requests a killed hook left behind: of an ended session or an hour old."""
+    if not os.path.isdir(directory):
+        return
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
+        request = read(path) if not name.endswith(".decision.json") else {}
+        created = request.get("created_epoch")
+        old = not isinstance(created, (int, float)) or moment - created > 3600
+        if request.get("session_id") in dead or old:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
 
 
 def stamp(moment: float) -> str:
