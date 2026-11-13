@@ -24,3 +24,4 @@ config.yaml
 
 # Evaluation runs hold ticket text and keys; only aggregate reports are published
 runs/
+.hypothesis/

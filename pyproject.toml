@@ -28,6 +28,7 @@ ticket-precedent = { git = "https://github.com/bondie/ticket-precedent", rev = "
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.100",
     "mypy>=1.11",
     "pytest>=8.0",
     "pytest-cov>=5.0",

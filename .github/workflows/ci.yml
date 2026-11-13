@@ -42,6 +42,16 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest --cov --cov-report=term --cov-fail-under=85
 
+  plugin:
+    name: Plugin manifest
+    runs-on: ubuntu-latest
+    env:
+      DISABLE_TELEMETRY: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - run: npx --yes @anthropic-ai/claude-code@2.1.322 plugin validate .
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
