@@ -1698,6 +1698,12 @@ def check(event: dict[str, Any], environ: Mapping[str, str]) -> tuple[Denial | N
     command = (event.get("tool_input") or {}).get(FILE_TOOLS.get(tool, "command"))
     if not isinstance(command, str) or not command.strip():
         return None, []
+    if "\0" in command:
+        return Denial(
+            "unparsable",
+            "the command or path holds a NUL character, which no shell or file system takes",
+            "remove the NUL character.",
+        ), []
     cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
     project_dir = environ.get("CLAUDE_PROJECT_DIR") or cwd
     config = load_config(environ, Path(project_dir) if project_dir else None)

@@ -1,0 +1,24 @@
+name: Guard fuzz
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Deep fuzz of the shell guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GUARD_FUZZ_PROFILE: deep
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest tests/test_guard_fuzz.py

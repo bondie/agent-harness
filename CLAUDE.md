@@ -52,6 +52,7 @@ uv sync
 uv run pytest --cov
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 claude plugin validate .
+GUARD_FUZZ_PROFILE=deep uv run pytest tests/test_guard_fuzz.py  # the weekly fuzz run, ~1 min
 uv run harness-eval run --out runs/NAME --from YYYY-MM-DD --to YYYY-MM-DD [--platform P] [--variants …]
 uv run harness-eval report runs/NAME
 ```
