@@ -36,6 +36,8 @@ NOTIFICATION_STATES = {
     "idle_prompt": "idle",
 }
 UNSAFE = frozenset("/\\\0")
+TURN_ENDS = {"Stop", "UserPromptSubmit", "SessionEnd", "SubagentStop"}
+TOOL_DONE = {"PostToolUse", "PostToolUseFailure"}
 SAME_STATE_SECONDS = 2
 STALE_SECONDS = 24 * 3600
 
@@ -101,12 +103,51 @@ def track_agent(event: Mapping[str, Any], environ: Mapping[str, str], moment: fl
     write(path, data)
 
 
+def describe(tool: str | None, tool_input: Any) -> str | None:
+    """What a permission is for, in one line: the command, the file or the address."""
+    if not isinstance(tool_input, dict):
+        return tool
+    for key in ("command", "file_path", "notebook_path", "url", "path", "pattern"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return f"{tool}: {' '.join(value.split())}"[:200]
+    return tool
+
+
+def clear_requests(event: Mapping[str, Any], environ: Mapping[str, str]) -> None:
+    """Drop the permission requests this event has answered: the call ran or the turn ended."""
+    name = event.get("hook_event_name")
+    if name not in TURN_ENDS and name not in TOOL_DONE:
+        return
+    directory = os.path.join(harness_home(environ), "permissions")
+    if not os.path.isdir(directory):
+        return
+    agent = event.get("agent_id") or None
+    for file in os.listdir(directory):
+        if not file.endswith(".json") or file.endswith(".decision.json"):
+            continue
+        path = os.path.join(directory, file)
+        request = read(path)
+        if request.get("session_id") != event.get("session_id") or request.get("agent_id") != agent:
+            continue
+        same_call = request.get("tool_name") == event.get("tool_name") and request.get(
+            "tool_input"
+        ) == event.get("tool_input")
+        if name in TURN_ENDS or same_call:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
+
+
 def transition(
     event: Mapping[str, Any], previous: Mapping[str, Any]
 ) -> tuple[str, str | None] | None:
     name = event.get("hook_event_name")
     tool = event.get("tool_name") if isinstance(event.get("tool_name"), str) else None
     agent = event.get("agent_id") or None
+    if name == "PermissionRequest":
+        return "waiting_permission", describe(tool, event.get("tool_input"))
     if agent and name != "Notification":
         waits_for = previous.get("waiting_agent")
         if name not in TOOL_EVENTS or previous.get("state") not in WAITING:
@@ -129,6 +170,8 @@ def transition(
         return None
     if state == "idle":
         return None if previous.get("state") in WAITING else (state, None)
+    if state == previous.get("state"):
+        return None
     message = event.get("message")
     return state, message[:200] if isinstance(message, str) else None
 
@@ -295,6 +338,7 @@ def record(
     name = event.get("hook_event_name")
     agent = event.get("agent_id") or None
     moment = time.time() if now is None else now
+    clear_requests(event, environ)
     if agent:
         track_agent(event, environ, moment)
     if name == "SessionEnd":
