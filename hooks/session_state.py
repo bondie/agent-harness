@@ -319,7 +319,14 @@ def remove_old_requests(directory: str, dead: set[str], moment: float) -> None:
         return
     for name in os.listdir(directory):
         path = os.path.join(directory, name)
-        request = read(path) if not name.endswith(".decision.json") else {}
+        if not name.endswith(".json"):
+            continue
+        if name.endswith(".decision.json"):
+            asked = os.path.join(directory, name.removesuffix(".decision.json") + ".json")
+            if not os.path.exists(asked):
+                os.remove(path)
+            continue
+        request = read(path)
         created = request.get("created_epoch")
         old = not isinstance(created, (int, float)) or moment - created > 3600
         if request.get("session_id") in dead or old:

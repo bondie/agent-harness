@@ -274,3 +274,18 @@ def test_session_start_removes_requests_a_killed_hook_left(home, environ):
     )
 
     assert sorted(path.name for path in folder.iterdir()) == ["fresh.json"]
+
+
+def test_cleanup_keeps_the_decision_of_a_live_request(home, environ):
+    folder = home / "permissions"
+    folder.mkdir(parents=True)
+    (folder / "r1.json").write_text(json.dumps({"session_id": "s-9", "created_epoch": 9999.0}))
+    (folder / "r1.decision.json").write_text(json.dumps({"behavior": "allow"}))
+    (folder / "gone.decision.json").write_text(json.dumps({"behavior": "allow"}))
+    (folder / ".r2.decision.tmp").write_text("{}")
+    session_state.record(
+        {"hook_event_name": "SessionStart", "session_id": "s-1"}, environ, now=10000.0
+    )
+
+    names = sorted(path.name for path in folder.iterdir())
+    assert names == [".r2.decision.tmp", "r1.decision.json", "r1.json"]
