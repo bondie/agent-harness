@@ -248,3 +248,29 @@ def test_the_hooks_are_registered_for_permission_requests():
     commands = [hook["command"] for entry in hooks["PermissionRequest"] for hook in entry["hooks"]]
     assert any("permission_bridge.py" in command for command in commands)
     assert any("session_state.py" in command for command in commands)
+
+
+def test_state_files_are_private_even_with_the_bridge_off(home, environ):
+    session_state.record(request(tool_input={"command": "mysql -pSecret"}), environ, now=1000.0)
+
+    path = home / "sessions" / "s-1.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_wait_seconds_stays_under_the_hook_timeout(home, environ):
+    enable(home, wait_seconds=99999)
+
+    assert bridge.settings(environ)["wait_seconds"] == bridge.LONGEST_WAIT
+
+
+def test_session_start_removes_requests_a_killed_hook_left(home, environ):
+    folder = home / "permissions"
+    folder.mkdir(parents=True)
+    (folder / "old.json").write_text(json.dumps({"session_id": "s-9", "created_epoch": 0}))
+    (folder / "fresh.json").write_text(json.dumps({"session_id": "s-9", "created_epoch": 9999.0}))
+    session_state.record(
+        {"hook_event_name": "SessionStart", "session_id": "s-1"}, environ, now=10000.0
+    )
+
+    assert sorted(path.name for path in folder.iterdir()) == ["fresh.json"]

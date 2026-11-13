@@ -465,7 +465,12 @@ A decision counts only from a regular file of the same user, not through a symli
 person answers in the terminal first, `session_state.py` removes the request once the call ran
 (the same tool and input) or the turn ended, and the hook stops waiting. Without a decision
 within `wait_seconds` the hook returns nothing and the prompt stays in the terminal. An allow
-does not override a deny rule. On PermissionRequest `session_state.py` also sets the session to
+does not override a deny rule. A viewer writes the decision to a temporary file and renames it.
+Two concurrent calls with the same tool and input share one fate: the first to run removes both
+requests, and the other prompt stays in the terminal only. `wait_seconds` is capped at 3540, under
+the hook's 3600-second timeout; the next SessionStart removes requests of ended sessions and any
+older than an hour, which a killed hook may leave. Session and agent files are written `0600` in
+`0700` folders, since `detail` can hold a command with a secret in it. On PermissionRequest `session_state.py` also sets the session to
 `waiting_permission` at once, with the command, file or address in `detail`.
 
 ## Guard events

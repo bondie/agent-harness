@@ -26,6 +26,7 @@ from typing import Any, TextIO
 from session_state import describe, harness_home, read
 
 DEFAULTS: dict[str, Any] = {"enabled": False, "wait_seconds": 3540, "poll_seconds": 0.25}
+LONGEST_WAIT = 3540
 DENIED = "The person denied this from the session viewer."
 
 
@@ -40,6 +41,7 @@ def settings(environ: Mapping[str, str]) -> dict[str, Any]:
         value = section.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             values[key] = float(value)
+    values["wait_seconds"] = min(values["wait_seconds"], LONGEST_WAIT)
     return values
 
 
