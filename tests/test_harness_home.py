@@ -42,3 +42,4 @@ def test_the_hooks_and_the_package_resolve_the_same_harness_home(environ, expect
     state = runaway.state_path({"session_id": "s", "agent_id": "a"}, environ)
     assert state == expected / "runaway" / "s" / "a.json"
     assert importlib.import_module("log_agent_runs").log_path({}).parent == DEFAULT
+    assert Path(importlib.import_module("session_state").harness_home(environ)) == expected

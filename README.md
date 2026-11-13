@@ -56,6 +56,7 @@ its own marketplace.
 | `hooks/memory_cap.py` | Records the sizes of the four agents' memory files when a run starts or resumes; when the agent stops or hands its report back, sends it back once if the run grew one of them over its size cap, whatever tool wrote it. After a Write or Edit that grows one of them to `warn_ratio` (80 %) of its cap, tells the agent once per file and run to move whole lessons verbatim into a topic file, or in a retro run to propose the moves ([Memory hygiene](#memory-hygiene)). |
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets, touch a production database or write to the git history, the remote or the forge (commits, pushes, merge requests: the team lead's), and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
 | `hooks/guard_runaway.py` | Stops a subagent that repeats the same call or keeps failing, and once tells one that has run long to report ([rules](#runaway-guard)). |
+| `hooks/session_state.py` | Keeps the state of each main session (working, waiting for an answer or a permission, idle) in `~/.claude/agent-harness/sessions/<session>.json` for a viewer ([Session state](#session-state)). |
 | `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
@@ -391,6 +392,34 @@ run.
 
 The rules are adapted from the [runaway-guard](https://github.com/RyanAlberts/best-of-Agent-Harnesses/tree/main/skills/runaway-guard)
 skill in best-of-Agent-Harnesses (MIT license); the code is this repository's own.
+
+## Session state
+
+`hooks/session_state.py` keeps one file per main session in `sessions/` under `$HARNESS_HOME`
+(default `~/.claude/agent-harness/`), so that a viewer (a menu bar app, a page) can show which
+sessions work and which wait for the person, across terminal windows. It runs on SessionStart,
+UserPromptSubmit, Notification, Stop and SessionEnd; for the tool calls of the main session
+`hooks/guard_runaway.py`, which runs on every tool call anyway, updates the file in the same
+process, which adds about 3 ms to a call. Subagent events are not recorded.
+
+```json
+{"version": 1, "session_id": "<session_id>", "pid": 12345, "cwd": "/work/shop/src", "root": "/work/shop", "project": "shop", "branch": "feature/SHOP-412", "state": "waiting_permission", "detail": "Claude needs your permission to use Bash", "state_since": "2026-11-13T15:40:02Z", "started_at": "2026-11-13T14:02:11Z", "updated_at": "2026-11-13T15:40:02Z", "updated_epoch": 1794584402.1}
+```
+
+| `state` | Set by | `detail` |
+|---|---|---|
+| `working` | UserPromptSubmit, and every tool call | the tool |
+| `waiting_answer` | a question (AskUserQuestion), a plan to approve (ExitPlanMode), an elicitation dialog | the tool |
+| `waiting_permission` | the `permission_prompt` notification, which Claude Code sends after about 6 seconds | its message |
+| `idle` | SessionStart and Stop: the turn ended and the session waits for the person | `null` |
+
+`state_since` moves only when `state` changes; the same state and detail are not rewritten
+within 2 seconds. `root` is the repository root (or the folder outside a repository),
+`project` its name and `branch` comes from `.git/HEAD`; all three are read without running git
+and refreshed on every event that is not a tool call. `pid` is the Claude Code process: SessionEnd removes the
+file, and for a session that ended without it a viewer drops the file when the process is gone;
+the next SessionStart removes such files too. Writes are atomic (a temporary file and a rename)
+and never block anything.
 
 ## Guard events
 
