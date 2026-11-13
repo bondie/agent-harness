@@ -57,6 +57,7 @@ its own marketplace.
 | `hooks/guard_shell.py` | Denies subagents shell commands that destroy work, print secrets, touch a production database or write to the git history, the remote or the forge (commits, pushes, merge requests: the team lead's), and shell or file-tool edits of Claude Code settings, its own settings, git hooks and installed plugins ([rules](#shell-guard)). |
 | `hooks/guard_runaway.py` | Stops a subagent that repeats the same call or keeps failing, and once tells one that has run long to report ([rules](#runaway-guard)). |
 | `hooks/session_state.py` | Keeps the state of each main session (working, waiting for an answer or a permission, idle) in `~/.claude/agent-harness/sessions/<session>.json` for a viewer ([Session state](#session-state)). |
+| `hooks/permission_bridge.py` | Off by default. Lets a session viewer answer a permission prompt while it shows in the terminal; whichever answers first applies ([Permission bridge](#permission-bridge)). |
 | `hooks/estimate_check.py` | When the estimator stops or hands its report back, checks the `harness-estimate` block that ends its estimate: every adjustment and part cites a ticket, a file or a measured time, and the total is the one code computes from the median or the parts. An invalid block goes back to the estimator, at most twice. |
 | `.mcp.json` | Starts the ticket-precedent MCP server. |
 
@@ -440,6 +441,32 @@ A viewer can compare the time it has run with the agent type's median in `runs.j
 `tool_calls` is approximate: parallel calls of one agent count without a lock and may lose an
 increment. SessionStart removes the agents of a session it finds ended, and any agent folder
 whose files have not changed for a day (an agent whose SubagentStop never came).
+
+## Permission bridge
+
+`hooks/permission_bridge.py` runs on PermissionRequest, which Claude Code fires while it shows the
+permission prompt; the prompt and the hook run at the same time and whichever answers first
+applies. Turn it on in `$HARNESS_HOME/guard.json`:
+
+```json
+{"permission_bridge": {"enabled": true, "wait_seconds": 3540, "poll_seconds": 0.25}}
+```
+
+The hook writes the request to `permissions/<id>.json` under `$HARNESS_HOME` (the folder is
+`0700`, the file `0600`; it holds the tool input, so a command with a secret in it is on disk
+until the prompt is answered) and waits for `permissions/<id>.decision.json`:
+
+```json
+{"behavior": "allow"}
+{"behavior": "deny", "message": "Not now."}
+```
+
+A decision counts only from a regular file of the same user, not through a symlink. When the
+person answers in the terminal first, `session_state.py` removes the request once the call ran
+(the same tool and input) or the turn ended, and the hook stops waiting. Without a decision
+within `wait_seconds` the hook returns nothing and the prompt stays in the terminal. An allow
+does not override a deny rule. On PermissionRequest `session_state.py` also sets the session to
+`waiting_permission` at once, with the command, file or address in `detail`.
 
 ## Guard events
 

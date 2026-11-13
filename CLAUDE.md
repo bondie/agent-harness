@@ -1,7 +1,7 @@
 # agent-harness
 
 A Claude Code plugin (four subagents, the `ticket`, `retro` and `stats` skills, a dynamic
-workflow, eleven hook scripts, an MCP server entry) and the Python package that backtests its
+workflow, twelve hook scripts, an MCP server entry) and the Python package that backtests its
 estimator and measures the team.
 
 ## Layout

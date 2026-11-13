@@ -57,6 +57,7 @@ ignore = [
 "tests/**" = ["S101", "S105", "S106"]
 # Runs on every tool call of the main session, where importing pathlib costs more than the work.
 "hooks/session_state.py" = ["PTH"]
+"hooks/permission_bridge.py" = ["PTH"]
 
 [tool.mypy]
 strict = true
