@@ -367,6 +367,44 @@ def test_a_subagent_file_lives_from_start_to_stop_and_counts_its_calls(repo, hom
     assert not agent_file(home).exists()
 
 
+def test_task_stop_of_the_main_session_marks_the_agent_until_it_runs_again(repo, home, environ):
+    session_state.record(subagent("SubagentStart", repo), environ, now=START)
+    session_state.record(subagent("SubagentStart", repo, agent="a-2"), environ, now=START)
+    stop = event("PostToolUse", repo, tool_name="TaskStop", tool_input={"task_id": "a-1"})
+    session_state.record(stop, environ, now=START + 30)
+    stopped = json.loads(agent_file(home).read_text(encoding="utf-8"))
+    other = json.loads(agent_file(home, "a-2").read_text(encoding="utf-8"))
+    session_state.record(subagent("PreToolUse", repo, tool_name="Read"), environ, now=START + 60)
+    resumed = json.loads(agent_file(home).read_text(encoding="utf-8"))
+
+    assert stopped["stopped_at"] == session_state.stamp(START + 30)
+    assert stopped["updated_epoch"] == START + 30
+    assert "stopped_at" not in other
+    assert "stopped_at" not in resumed
+
+
+def test_task_stop_of_a_shell_or_an_unsafe_id_leaves_the_agents(repo, home, environ):
+    session_state.record(subagent("SubagentStart", repo), environ, now=START)
+    for task in ("b-shell", "../a-1", None):
+        stop = event("PostToolUse", repo, tool_name="TaskStop", tool_input={"task_id": task})
+        session_state.record(stop, environ, now=START + 30)
+
+    assert "stopped_at" not in json.loads(agent_file(home).read_text(encoding="utf-8"))
+    assert not (home / "agents" / "s-1" / "b-shell.json").exists()
+
+
+def test_a_failed_or_a_subagents_task_stop_marks_nothing(repo, home, environ):
+    session_state.record(subagent("SubagentStart", repo), environ, now=START)
+    session_state.record(subagent("SubagentStart", repo, agent="a-2"), environ, now=START)
+    failed = event("PostToolUseFailure", repo, tool_name="TaskStop", tool_input={"task_id": "a-1"})
+    session_state.record(failed, environ, now=START + 30)
+    own = subagent("PostToolUse", repo, tool_name="TaskStop", tool_input={"task_id": "a-2"})
+    session_state.record(own, environ, now=START + 30)
+
+    assert "stopped_at" not in json.loads(agent_file(home).read_text(encoding="utf-8"))
+    assert "stopped_at" not in json.loads(agent_file(home, "a-2").read_text(encoding="utf-8"))
+
+
 def test_a_tool_call_of_an_unknown_subagent_creates_no_file(repo, home, environ):
     session_state.record(subagent("PreToolUse", repo, tool_name="Read"), environ, now=START)
 

@@ -13,7 +13,9 @@ its own prompt started (or a wait of unknown origin); a compaction keeps the sta
 removes the file; a session that ended without it is left for the viewer to drop by its `pid`,
 and the next SessionStart removes it (one without a `pid` after a day). Each running subagent
 also gets `$HARNESS_HOME/agents/<session>/<agent>.json` (type, start, tool calls, last tool)
-from SubagentStart to SubagentStop; the cleanup of a session removes its agents too. Standard
+from SubagentStart to SubagentStop. TaskStop fires no SubagentStop, so the main session's
+TaskStop adds `stopped_at` to the file instead, for a viewer to offer resuming it; the agent's next
+start or tool call clears the mark. The cleanup of a session removes its agents too. Standard
 library only; an internal error is printed to stderr and never blocks anything.
 """
 
@@ -95,11 +97,25 @@ def track_agent(event: Mapping[str, Any], environ: Mapping[str, str], moment: fl
             "last_tool": None,
         }
     if name == "PreToolUse":
+        data.pop("stopped_at", None)
         tool = event.get("tool_name")
         data["tool_calls"] = int(data.get("tool_calls") or 0) + 1
         data["last_tool"] = tool if isinstance(tool, str) else None
     data["updated_at"] = stamp(moment)
     data["updated_epoch"] = moment
+    write(path, data)
+
+
+def mark_stopped_agent(event: Mapping[str, Any], environ: Mapping[str, str], moment: float) -> None:
+    tool_input = event.get("tool_input")
+    if event.get("tool_name") != "TaskStop" or not isinstance(tool_input, Mapping):
+        return
+    task = {"session_id": event.get("session_id"), "agent_id": tool_input.get("task_id")}
+    path = agent_path(task, environ)
+    data = read(path) if path is not None else {}
+    if path is None or not data:
+        return
+    data |= {"stopped_at": stamp(moment), "updated_at": stamp(moment), "updated_epoch": moment}
     write(path, data)
 
 
@@ -371,6 +387,8 @@ def record(
     clear_requests(event, environ)
     if agent:
         track_agent(event, environ, moment)
+    if not agent and name == "PostToolUse":
+        mark_stopped_agent(event, environ, moment)
     if name == "SessionEnd":
         if not agent and os.path.exists(path):
             os.remove(path)

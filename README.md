@@ -438,6 +438,9 @@ From SubagentStart to SubagentStop each subagent has `agents/<session>/<agent>.j
 ```
 
 A viewer can compare the time it has run with the agent type's median in `runs.jsonl`.
+TaskStop fires no SubagentStop, so when the main session stops a subagent with it, the file stays
+with a `stopped_at` stamp: the agent can still be resumed with SendMessage. Its next start or tool
+call removes the stamp.
 `tool_calls` is approximate: parallel calls of one agent count without a lock and may lose an
 increment. SessionStart removes the agents of a session it finds ended, and any agent folder
 whose files have not changed for a day (an agent whose SubagentStop never came).
