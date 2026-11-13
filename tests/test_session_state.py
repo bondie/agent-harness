@@ -96,7 +96,7 @@ def test_each_event_sets_its_state(hook, extra, expected, repo, home, environ):
     assert data["pid"] == os.getpid()
 
 
-def test_an_idle_prompt_notification_leaves_the_state_alone(repo, home, environ):
+def test_an_idle_prompt_keeps_an_idle_session_as_it_was(repo, home, environ):
     session_state.record(event("Stop", repo), environ, now=START)
     session_state.record(
         event("Notification", repo, notification_type="idle_prompt"), environ, now=START + 60
@@ -106,12 +106,80 @@ def test_an_idle_prompt_notification_leaves_the_state_alone(repo, home, environ)
     assert state_file(home)["state_since"] == session_state.stamp(START)
 
 
-def test_subagent_events_are_ignored(repo, home, environ):
+def test_an_idle_prompt_ends_a_turn_interrupted_without_stop(repo, home, environ):
+    session_state.record(event("PreToolUse", repo, tool_name="Bash"), environ, now=START)
+    session_state.record(
+        event("Notification", repo, notification_type="idle_prompt"), environ, now=START + 60
+    )
+
+    assert (state_file(home)["state"], state_file(home)["detail"]) == ("idle", None)
+
+
+def test_a_compaction_keeps_the_state_of_a_working_session(repo, home, environ):
+    session_state.record(event("PreToolUse", repo, tool_name="Bash"), environ, now=START)
+    session_state.record(event("SessionStart", repo, source="compact"), environ, now=START + 9)
+
+    data = state_file(home)
+    assert (data["state"], data["detail"]) == ("working", "Bash")
+    assert data["state_since"] == session_state.stamp(START)
+
+
+def test_a_compaction_of_an_unknown_session_starts_idle(repo, home, environ):
+    session_state.record(event("SessionStart", repo, source="compact"), environ, now=START)
+
+    assert state_file(home)["state"] == "idle"
+
+
+def test_subagent_tool_calls_leave_a_working_or_idle_session_alone(repo, home, environ):
     session_state.record(
         event("PreToolUse", repo, tool_name="Bash", agent_id="a-1"), environ, now=START
     )
-
     assert not (home / "sessions").exists()
+    session_state.record(event("Stop", repo), environ, now=START + 1)
+    session_state.record(
+        event("PostToolUse", repo, tool_name="Bash", agent_id="a-1"), environ, now=START + 5
+    )
+
+    assert state_file(home)["state"] == "idle"
+
+
+def test_a_subagent_permission_prompt_waits_and_its_next_call_ends_the_wait(repo, home, environ):
+    session_state.record(event("PreToolUse", repo, tool_name="Agent"), environ, now=START)
+    prompt = event(
+        "Notification", repo, notification_type="permission_prompt", message="Bash", agent_id="a-1"
+    )
+    session_state.record(prompt, environ, now=START + 10)
+    waiting = state_file(home)
+    session_state.record(
+        event("PostToolUse", repo, tool_name="Read", agent_id="a-2"), environ, now=START + 12
+    )
+    still = state_file(home)["state"]
+    session_state.record(
+        event("PostToolUse", repo, tool_name="Bash", agent_id="a-1"), environ, now=START + 30
+    )
+
+    assert (waiting["state"], waiting["waiting_agent"]) == ("waiting_permission", "a-1")
+    assert waiting["project"] == "shop"
+    assert still == "waiting_permission"
+    assert (state_file(home)["state"], state_file(home)["waiting_agent"]) == ("working", None)
+
+
+def test_a_subagent_call_ends_a_wait_whose_origin_is_unknown(repo, home, environ):
+    session_state.record(
+        event("Notification", repo, notification_type="permission_prompt"), environ, now=START
+    )
+    session_state.record(
+        event("PostToolUse", repo, tool_name="Bash", agent_id="a-1"), environ, now=START + 30
+    )
+
+    assert state_file(home)["state"] == "working"
+
+
+def test_a_subagent_session_end_keeps_the_file(repo, home, environ):
+    session_state.record(event("Stop", repo), environ, now=START)
+    session_state.record(event("SessionEnd", repo, agent_id="a-1"), environ, now=START + 1)
+
+    assert (home / "sessions" / "s-1.json").exists()
 
 
 def test_session_end_removes_the_file(repo, home, environ):
@@ -159,14 +227,15 @@ def test_the_project_comes_from_the_repository_root_and_a_worktree_file(tmp_path
     tree = tmp_path / "wt"
     (tree / "deep").mkdir(parents=True)
     (tree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n")
+    (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
 
-    assert session_state.git_head(str(tree / "deep")) == (str(tree), "topic")
+    assert session_state.git_head(str(tree / "deep")) == (str(tree), "main", "topic")
 
 
 def test_a_detached_head_has_no_branch(repo):
     (repo / ".git" / "HEAD").write_text("0123456789abcdef\n", encoding="utf-8")
 
-    assert session_state.git_head(str(repo / "src")) == (str(repo), None)
+    assert session_state.git_head(str(repo / "src")) == (str(repo), "shop", None)
 
 
 def test_outside_a_repository_the_project_is_the_folder(tmp_path, home, environ):
@@ -196,9 +265,24 @@ def test_session_start_removes_files_of_dead_sessions(repo, home, environ):
     sessions.mkdir(parents=True)
     (sessions / "dead.json").write_text(json.dumps({"pid": 2**22 + 12345}))
     (sessions / "live.json").write_text(json.dumps({"pid": os.getpid()}))
+    unknown = {"pid": None, "updated_epoch": START - 3600}
+    (sessions / "unknown.json").write_text(json.dumps(unknown))
+    stale = {"pid": None, "updated_epoch": START - 2 * 24 * 3600}
+    (sessions / "stale.json").write_text(json.dumps(stale))
     session_state.record(event("SessionStart", repo), environ, now=START)
 
-    assert sorted(path.name for path in sessions.glob("*.json")) == ["live.json", "s-1.json"]
+    names = sorted(path.name for path in sessions.glob("*.json"))
+    assert names == ["live.json", "s-1.json", "unknown.json"]
+
+
+def test_a_failed_process_lookup_is_not_repeated(repo, home, environ, monkeypatch):
+    calls: list[int] = []
+    monkeypatch.setattr(session_state, "claude_pid", lambda: calls.append(1))
+    session_state.record(event("UserPromptSubmit", repo), environ, now=START)
+    session_state.record(event("Stop", repo), environ, now=START + 10)
+
+    assert calls == [1]
+    assert state_file(home)["pid"] is None
 
 
 def test_the_write_is_atomic_and_leaves_no_temporary_file(repo, home, environ):
@@ -230,7 +314,7 @@ def test_the_runaway_guard_records_main_session_tool_calls(repo, home, environ):
     assert (data["state"], data["detail"], data["project"]) == ("working", "Edit", "shop")
 
 
-def test_the_runaway_guard_still_ignores_the_session_state_of_a_subagent(repo, home, environ):
+def test_the_runaway_guard_passes_a_subagent_call_that_creates_no_state(repo, home, environ):
     payload = json.dumps(event("PreToolUse", repo, tool_name="Edit", tool_input={}, agent_id="a-1"))
     subprocess.run(  # noqa: S603
         [sys.executable, str(HOOKS / "guard_runaway.py")],

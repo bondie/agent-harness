@@ -400,7 +400,8 @@ skill in best-of-Agent-Harnesses (MIT license); the code is this repository's ow
 sessions work and which wait for the person, across terminal windows. It runs on SessionStart,
 UserPromptSubmit, Notification, Stop and SessionEnd; for the tool calls of the main session
 `hooks/guard_runaway.py`, which runs on every tool call anyway, updates the file in the same
-process, which adds about 3 ms to a call. Subagent events are not recorded.
+process, which adds about 3 ms to a call. A subagent's events change the state only around a
+permission prompt: its prompt makes the session wait, and its next tool call ends that wait.
 
 ```json
 {"version": 1, "session_id": "<session_id>", "pid": 12345, "cwd": "/work/shop/src", "root": "/work/shop", "project": "shop", "branch": "feature/SHOP-412", "state": "waiting_permission", "detail": "Claude needs your permission to use Bash", "state_since": "2026-11-13T15:40:02Z", "started_at": "2026-11-13T14:02:11Z", "updated_at": "2026-11-13T15:40:02Z", "updated_epoch": 1794584402.1}
@@ -410,15 +411,20 @@ process, which adds about 3 ms to a call. Subagent events are not recorded.
 |---|---|---|
 | `working` | UserPromptSubmit, and every tool call | the tool |
 | `waiting_answer` | a question (AskUserQuestion), a plan to approve (ExitPlanMode), an elicitation dialog | the tool |
-| `waiting_permission` | the `permission_prompt` notification, which Claude Code sends after about 6 seconds | its message |
-| `idle` | SessionStart and Stop: the turn ended and the session waits for the person | `null` |
+| `waiting_permission` | the `permission_prompt` notification, which Claude Code sends after about 6 seconds, also for a subagent's prompt (then `waiting_agent` holds its id) | its message |
+| `idle` | SessionStart (a compaction keeps the state), Stop, and the `idle_prompt` notification, which also ends a turn interrupted with Esc, where no Stop comes | `null` |
+
+There is no event when a permission is granted: the state stays `waiting_permission` until the
+tool call ends, so after a long command a viewer shows the wait for its whole run.
 
 `state_since` moves only when `state` changes; the same state and detail are not rewritten
-within 2 seconds. `root` is the repository root (or the folder outside a repository),
-`project` its name and `branch` comes from `.git/HEAD`; all three are read without running git
-and refreshed on every event that is not a tool call. `pid` is the Claude Code process: SessionEnd removes the
+within 2 seconds. `root` is the working tree root (or the folder outside a repository),
+`project` the repository's name (the main repository's for a linked worktree) and `branch` comes
+from `.git/HEAD`; all three are read without running git and refreshed on every event of the
+main session that is not a tool call. `pid` is the Claude Code process: SessionEnd removes the
 file, and for a session that ended without it a viewer drops the file when the process is gone;
-the next SessionStart removes such files too. Writes are atomic (a temporary file and a rename)
+the next SessionStart removes such files too, and a file without a `pid` (Claude Code's process
+was not found, as when it runs under `node`) once it is a day old. Writes are atomic (a temporary file and a rename)
 and never block anything.
 
 ## Guard events
