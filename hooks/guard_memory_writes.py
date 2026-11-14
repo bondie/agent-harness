@@ -316,14 +316,25 @@ def decision(event: dict[str, Any], environ: dict[str, str] | None = None) -> di
 
 
 def main(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
+    event: Any = None
     try:
-        verdict = decision(json.load(stdin))
+        event = json.load(stdin)
+        verdict = decision(event)
     except Exception as error:
+        if not isinstance(event, dict) or not event.get("agent_type"):
+            print(
+                f"guard_memory_writes.py allowed the write after an internal error: {error!r}",
+                file=sys.stderr,
+            )
+            return 0
         print(
-            f"guard_memory_writes.py allowed the write after an internal error: {error!r}",
+            f"guard_memory_writes.py denied the write after an internal error: {error!r}",
             file=sys.stderr,
         )
-        return 0
+        verdict = deny(
+            f"The memory guard could not check this write ({type(error).__name__}: {error}). "
+            "Report the error to the lead and let it decide."
+        )
     if verdict is not None:
         json.dump(verdict, stdout)
     return 0

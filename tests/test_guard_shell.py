@@ -1374,6 +1374,28 @@ def test_an_internal_error_allows_the_command_and_logs_it(tmp_path):
     assert "guard_shell.py allowed the command after an internal error" in result.stderr
 
 
+def broken_check(event: dict[str, Any], environ: Any) -> Any:
+    raise KeyError("boom")
+
+
+def test_an_internal_error_denies_a_subagent_call_and_logs_the_rule(tmp_path, monkeypatch):
+    monkeypatch.setattr(guard_shell, "check", broken_check)
+    event = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "agent_type": SUBAGENT}
+    output = json.loads(run_main(event, tmp_path))["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "rule guard_error" in output["permissionDecisionReason"]
+    assert "KeyError" in output["permissionDecisionReason"]
+    assert [line["rule"] for line in guard_events(tmp_path)] == ["guard_error"]
+    assert "boom" not in (tmp_path / "guard-events.jsonl").read_text()
+
+
+def test_an_internal_error_allows_the_main_session_call(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(guard_shell, "check", broken_check)
+    assert run_main({"tool_name": "Bash", "tool_input": {"command": "ls"}}, tmp_path) == ""
+    assert guard_events(tmp_path) == []
+    assert "allowed the command after an internal error" in capsys.readouterr().err
+
+
 def test_the_hook_denies_a_file_tool_edit_of_the_guard(tmp_path):
     event = {
         "tool_name": "Edit",
