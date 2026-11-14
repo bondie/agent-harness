@@ -208,6 +208,7 @@ denial is logged ([Guard events](#guard-events)).
 | `destructive-sql` | `DROP DATABASE`/`TABLE`/`SCHEMA` or `TRUNCATE` in a database client's arguments or heredoc, or in the command piped into it, for any host | `SELECT TRUNCATE(x, 2)` |
 | `unparsable` | a `$(` that is never closed, so the rest of the command cannot be checked | |
 | `extra_deny` | a command matching one of your regexes, with your reason | |
+| `guard_error` | a subagent's call the guard raised on, with the error in the reason | the main session's call |
 
 A repository counts as inside the temp dirs for `git-write`, `git-discard` and
 `branch-force-delete` when it is below `$TMPDIR` or a `/tmp/claude-*` scratchpad with links
@@ -262,7 +263,8 @@ Lists append to the earlier ones; `scope` and `allow_force_with_lease` take the 
 
 A glob without `/` matches the file name, one with `/` the path at any depth, both ignoring
 case. An invalid file or key is ignored and named in the next deny reason; a `runaway` object
-is left to the hook that reads it. An internal error lets the command through and logs to
+is left to the hook that reads it. An internal error denies a subagent's call with the rule
+`guard_error` and the error in the reason, lets the main session's call through, and logs to
 stderr. Example ([`examples/agent-harness.json`](examples/agent-harness.json)):
 
 ```json
@@ -292,6 +294,14 @@ glob or `$(…)` in the file name, a secret variable printed by name (`echo $API
 `declare -p`, guard files written by other tools (`curl -o`, `git apply`) or by moving their
 directory (`mv .claude …`), `$(…)` inside an unquoted heredoc, and it does not check the Read
 tool.
+
+A denylist over shell cannot be complete, so the boundary belongs to the operating system:
+turn on Claude Code's [Bash sandbox](https://code.claude.com/docs/en/sandboxing) (`/sandbox`,
+or `"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}` in settings). It runs
+subagents' commands too, by default lets them write only to the working directory and temp,
+keeps the Claude Code settings and `.git/hooks` read-only inside it, and sends network
+traffic through a domain allowlist. It does not cover the file tools (Write, Edit) or hooks, which the guard
+still checks.
 
 ### Coverage
 
@@ -554,6 +564,7 @@ agents are not checked. The caps, the source requirement and the warning mark li
 that is not a positive number, a `require_source` that is not a boolean and a `warn_ratio`
 that is not a number above 0 and at most 1 fall back to the default.
 With `"require_source": false` a date alone, `(YYYY-MM-DD)`, is enough.
+An internal error denies the write of a subagent and logs to stderr.
 
 ```json
 { "max_file_kb": 8, "max_index_kb": 4, "require_source": true, "warn_ratio": 0.8 }
@@ -935,6 +946,14 @@ uv run harness-eval active-time SHOP-412                         # --idle 10, --
 - **Tracker writes are blocked, not just discouraged.** The prompts say subagents only read;
   a `PreToolUse` hook enforces it for any MCP tool that looks like a tracker write. The main
   session keeps its normal permission prompt, and the playbook asks before every write.
+- **The guards fail closed for subagents.** When the shell guard or the memory guard raises on
+  a subagent's call, it denies the call and names the error; the main session's call goes
+  through. A crash is then a needless denial, not a hole, so `tests/test_guard_fuzz.py`
+  measures false denials: it checks that no input makes the guard raise, and that a force
+  push and a write to the Claude Code settings or `.git/hooks` are denied anywhere in a chain
+  of wrappers (`sudo`, `env`, subshells, `$(…)`, `bash -c`, `eval`, heredocs). A hook that
+  runs past its timeout still lets the call through, and the fuzz does not time it. The runaway
+  guard still lets a call through after an error: it stops loops, it is not a boundary.
 - **Every agent remembers, and the read-only ones remember nothing else.** All four have
   `memory: user`: the analyst keeps where things live in each codebase, the estimator keeps
   calibration and corrections, the implementer keeps commands and traps, the reviewer keeps

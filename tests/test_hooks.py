@@ -1,3 +1,5 @@
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -866,6 +868,26 @@ def test_bad_input_lets_the_memory_write_through_and_logs_it(tmp_path, payload):
     assert (result.returncode, result.stdout) == (0, "")
     assert "guard_memory_writes.py allowed the write after an internal error" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_an_internal_error_denies_a_subagent_memory_write(monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("guard_memory", HOOKS / "guard_memory_writes.py")
+    assert spec is not None
+    assert spec.loader is not None
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    def broken(event: dict[str, Any]) -> Any:
+        raise KeyError("boom")
+
+    monkeypatch.setattr(guard, "decision", broken)
+    stdout = io.StringIO()
+    event = {"tool_name": "Write", "agent_type": "agent-harness:reviewer-qa"}
+    assert guard.main(io.StringIO(json.dumps(event)), stdout) == 0
+    output = json.loads(stdout.getvalue())["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "KeyError" in output["permissionDecisionReason"]
+    assert "denied the write after an internal error" in capsys.readouterr().err
 
 
 def test_bad_input_never_blocks_the_session(tmp_path):
