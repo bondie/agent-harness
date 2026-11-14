@@ -178,6 +178,13 @@ def _team_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]
         metavar="MINUTES",
         help="a longer gap between records does not count (default: %(default)g)",
     )
+    cmd.add_argument(
+        "--away",
+        type=float,
+        default=activetime.AWAY_SECONDS / 60,
+        metavar="MINUTES",
+        help="a longer wait for your prompt means you were away (default: %(default)g)",
+    )
     cmd.add_argument("--json", action="store_true", help="JSON instead of a line of text")
     cmd.set_defaults(handler=_active_time)
 
@@ -389,7 +396,9 @@ def _export_case(args: argparse.Namespace) -> int:
     case = prospective.eval_case(args.key, estimate, analysis, actual, found_diff)
     active = activetime.measure(args.key)
     if active.total_seconds:
-        case["active_time"] = active.as_json()
+        case["active_time"] = active.as_json() | {
+            "total_hours_by_idle": activetime.sensitivity(args.key)
+        }
     target = harness_home() / "eval-cases" / f"{args.key}.json"
     write_json(target, case)
     outcome = {"ticket": args.key, "actual": actual, "diff": found_diff, "exported_at": _now()}
@@ -422,24 +431,32 @@ def files_by_key(
 
 
 def _active_time(args: argparse.Namespace) -> int:
-    if args.idle <= 0:
-        raise ValueError("--idle must be a positive number of minutes")
-    active = activetime.measure(args.key, idle=args.idle * 60)
+    if args.idle <= 0 or args.away <= 0:
+        raise ValueError("--idle and --away must be positive numbers of minutes")
+    away = args.away * 60
+    active = activetime.measure(args.key, idle=args.idle * 60, away=away)
+    data = active.as_json() | {"total_hours_by_idle": activetime.sensitivity(args.key, away=away)}
     if args.json:
-        print(json.dumps(active.as_json(), indent=2, ensure_ascii=False))
+        print(json.dumps(data, indent=2, ensure_ascii=False))
         return 0
     if not active.total_seconds:
         print(f"{args.key}: no active time; no work marker or ticket run names it")
         return 0
-    data = active.as_json()
+    by_idle = " / ".join(f"{hours:g}" for hours in data["total_hours_by_idle"].values())
+    minutes = "/".join(data["total_hours_by_idle"])
     print(
         f"{args.key}: {data['total_hours']:g} h active (lead {data['lead_hours']:g} h, "
         f"agents {data['agent_hours']:g} h, overlaps counted once) in {active.sessions} "
-        f"session(s) and {active.agents} agent run(s), {data['first']} to {data['last']}; "
-        f"gaps over {args.idle:g} min not counted"
+        f"session(s) and {active.agents} agent run(s), {data['first']} to {data['last']}"
     )
+    print(
+        f"you: {data['person_hours']:g} h between a reply and your next prompt, "
+        f"{data['gate_hours']:g} h of it answering questions and approving plans; "
+        f"waits over {args.away:g} min count as away"
+    )
+    print(f"active with a {minutes} min idle threshold: {by_idle} h")
     if not active.sessions:
-        print("no work marker names it, so the lead session's time is missing")
+        print("no work marker names it, so the lead session's and your time are missing")
     return 0
 
 

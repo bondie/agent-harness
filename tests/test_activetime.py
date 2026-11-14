@@ -124,6 +124,7 @@ def test_the_command_prints_the_hours(setup, capsys):
     assert "no active time" in capsys.readouterr().out
 
     assert cli.main(["active-time", "SHOP-1", "--idle", "0"]) == 1
+    assert cli.main(["active-time", "SHOP-1", "--away", "-1"]) == 1
 
 
 def test_export_case_freezes_the_active_time(setup, capsys):
@@ -139,6 +140,7 @@ def test_export_case_freezes_the_active_time(setup, capsys):
     outcome = json.loads((ticket / "outcome.json").read_text("utf-8"))
     assert case["active_time"]["total_hours"] == 0.39
     assert outcome["active_time"] == case["active_time"]
+    assert list(case["active_time"]["total_hours_by_idle"]) == ["3", "5", "10"]
 
 
 def test_a_run_filed_under_another_key_does_not_count_in_the_window(setup):
@@ -182,3 +184,71 @@ def test_clip_and_union_match_counting_each_second(intervals, window):
     covered = {second for a, b in intervals for second in range(a, b) if start <= second < stop}
 
     assert activetime.union(clipped) == len(covered)
+
+
+def prompt(offset: float, text: str = "go on") -> dict[str, Any]:
+    return {"type": "user", "timestamp": iso(offset), "message": {"content": text}}
+
+
+def timed(lines: list[dict[str, Any]]) -> list[tuple[float, dict[str, Any]]]:
+    return [(activetime.epoch(line["timestamp"]) or 0.0, line) for line in lines]
+
+
+def test_the_wait_for_a_prompt_is_the_persons_and_a_question_is_a_gate():
+    lines = timed(
+        [
+            prompt(0),
+            record(30),
+            prompt(150),
+            record(200, type="tool_use", id="q", name="AskUserQuestion"),
+            record(800, "user", type="tool_result", tool_use_id="q"),
+            record(820),
+            prompt(4000),
+            record(4010),
+            {
+                "type": "user",
+                "timestamp": iso(4100),
+                "message": {"content": "<task-notification> x"},
+            },
+            record(4120),
+        ]
+    )
+
+    found = activetime.split(lines, idle=300, away=1800)
+
+    def offsets(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        return [(a - T0, b - T0) for a, b in intervals]
+
+    assert offsets(found.busy) == [
+        (0, 30),
+        (150, 200),
+        (800, 820),
+        (4000, 4010),
+        (4010, 4100),
+        (4100, 4120),
+    ]
+    assert offsets(found.person) == [(30, 150)]
+    assert offsets(found.gates) == [(200, 800)]
+
+
+def test_measure_reports_the_persons_time_inside_the_window(setup):
+    lead = setup["projects"] / "-work-shop" / "s-1.jsonl"
+    write_lines(lead, [prompt(0), record(60), prompt(260), record(300)])
+
+    active = activetime.measure("SHOP-1")
+
+    assert active.lead_seconds == 100
+    assert active.person_seconds == 200
+    assert active.gate_seconds == 0
+
+
+def test_the_command_shows_the_person_and_the_sensitivity(setup, capsys):
+    assert cli.main(["active-time", "SHOP-1", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert list(data["total_hours_by_idle"]) == ["3", "5", "10"]
+    assert "person_hours" in data
+
+    assert cli.main(["active-time", "SHOP-1"]) == 0
+    out = capsys.readouterr().out
+    assert "you: " in out
+    assert "3/5/10 min idle threshold" in out

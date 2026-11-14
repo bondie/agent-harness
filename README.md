@@ -869,7 +869,7 @@ uv run harness-eval escaped --commit 3f2a9c1 --repo ../shop --case incident-12-h
 uv run harness-eval metrics --repo ../shop ../platform          # or --json
 
 # How long sessions and agents were busy on the ticket (export-case freezes it)
-uv run harness-eval active-time SHOP-412                         # --idle 10, --json
+uv run harness-eval active-time SHOP-412                         # --idle 10, --away 20, --json
 ```
 
 - **`export-case KEY`** writes `$HARNESS_HOME/eval-cases/KEY.json`: the estimate and the
@@ -895,7 +895,13 @@ uv run harness-eval active-time SHOP-412                         # --idle 10, --
   hour; a longer gap does not count at all. An open question (AskUserQuestion, a plan to
   approve) does not keep a transcript busy, but a tool call waiting at a permission prompt does,
   up to that hour. A run that `runs.jsonl` files under another key does not count inside the
-  window. The lead, the
+  window. In the lead session, the wait between a reply and your next prompt is your time, not
+  active time, and so is an open question or plan to approve (the gates, also shown on their
+  own); a wait over `--away` minutes (30 by default) means you were away and does not count.
+  Time you spend outside the session, such as reading the ticket in the tracker, is not seen.
+  A permission prompt cannot be told from a running tool, so it counts as active. The output
+  repeats the total for idle thresholds of 3, 5 and 10 minutes: a conclusion that changes
+  between them is not robust. The lead, the
   agents and the total are unions of intervals, so parallel agents and sessions count once.
   It measures machine-side activity, not a person's hours, and it is not affected by how
   time is logged. Claude Code deletes transcripts after 30 days by default

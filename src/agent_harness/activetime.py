@@ -8,9 +8,10 @@ subagents; the runs that `runs.jsonl` files under the key count wherever they ra
 
 Time is active when two consecutive records of one transcript are at most `idle` apart, or
 when a tool call is still running between them and the gap is at most `tool_cap`; a longer
-gap does not count at all. A question to the person does not keep a transcript busy. The
-lead, the agents and the total are unions of intervals, so parallel agents and sessions count
-once. It is the time
+gap does not count at all. In the lead session, a gap that ends in the person's prompt while no
+tool runs is the person's time, and so is an open question or plan to approve (a gate), each
+up to `away`; a longer gap means the person was away. The lead, the agents, the total and the
+person's time are unions of intervals, so parallel agents and sessions count once. It is the time
 a session or an agent was busy, not the hours a person logged. The transcript format is
 internal to Claude Code and Claude Code deletes old transcripts (30 days by default), so the
 reader skips what it does not understand and `export-case` freezes the result.
@@ -31,6 +32,15 @@ from .artifacts import harness_home, ticket_keys
 
 IDLE_SECONDS = 5 * 60
 TOOL_CAP_SECONDS = 60 * 60
+AWAY_SECONDS = 30 * 60
+SENSITIVITY_MINUTES = (3, 5, 10)
+SYSTEM_PROMPTS = (
+    "<task-notification",
+    "<agent-message",
+    "<local-command",
+    "<system-reminder",
+    "Caveat:",
+)
 RECORD_TYPES = {"user", "assistant", "attachment"}
 WAITING_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
 Interval = tuple[float, float]
@@ -45,11 +55,20 @@ class Window:
 
 
 @dataclass(frozen=True)
+class Split:
+    busy: list[Interval]
+    person: list[Interval]
+    gates: list[Interval]
+
+
+@dataclass(frozen=True)
 class ActiveTime:
     ticket: str
     lead_seconds: float
     agent_seconds: float
     total_seconds: float
+    person_seconds: float
+    gate_seconds: float
     sessions: int
     agents: int
     first: float | None
@@ -62,12 +81,22 @@ class ActiveTime:
             "total_hours": hours(self.total_seconds),
             "lead_hours": hours(self.lead_seconds),
             "agent_hours": hours(self.agent_seconds),
+            "person_hours": hours(self.person_seconds),
+            "gate_hours": hours(self.gate_seconds),
             "sessions": self.sessions,
             "agents": self.agents,
             "first": stamp(self.first),
             "last": stamp(self.last),
             "idle_minutes": self.idle_seconds / 60,
         }
+
+
+def sensitivity(ticket: str, **options: Any) -> dict[str, float]:
+    """The total hours for each idle threshold of `SENSITIVITY_MINUTES`, keyed by minutes."""
+    return {
+        str(minutes): hours(measure(ticket, idle=minutes * 60, **options).total_seconds)
+        for minutes in SENSITIVITY_MINUTES
+    }
 
 
 def hours(seconds: float) -> float:
@@ -148,34 +177,77 @@ def records(path: Path) -> list[tuple[float, dict[str, Any]]]:
     return found
 
 
-def tool_ids(entry: dict[str, Any], kind: str, field: str) -> set[str]:
+def content_items(entry: dict[str, Any]) -> list[dict[str, Any]]:
     message = entry.get("message")
     content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, list):
-        return set()
+    return [item for item in content if isinstance(item, dict)] if isinstance(content, list) else []
+
+
+def tool_uses(entry: dict[str, Any], waiting: bool) -> set[str]:
+    """The ids of the tool calls in a record: questions to the person, or the other tools."""
     return {
-        str(item.get(field))
-        for item in content
-        if isinstance(item, dict)
-        and item.get("type") == kind
-        and item.get(field)
-        and item.get("name") not in WAITING_TOOLS
+        str(item["id"])
+        for item in content_items(entry)
+        if item.get("type") == "tool_use"
+        and item.get("id")
+        and (item.get("name") in WAITING_TOOLS) == waiting
     }
 
 
+def tool_results(entry: dict[str, Any]) -> set[str]:
+    items = content_items(entry)
+    return {str(item["tool_use_id"]) for item in items if item.get("tool_use_id")}
+
+
+def is_prompt(entry: dict[str, Any]) -> bool:
+    """A prompt the person typed, not a tool result, a meta record or a system message."""
+    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isCompactSummary"):
+        return False
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    items = content_items(entry)
+    if any(item.get("type") == "tool_result" for item in items):
+        return False
+    text = content if isinstance(content, str) else " ".join(str(i.get("text", "")) for i in items)
+    return bool(text.strip()) and not text.lstrip().startswith(SYSTEM_PROMPTS)
+
+
+def split(
+    entries: list[tuple[float, dict[str, Any]]],
+    idle: float,
+    tool_cap: float = TOOL_CAP_SECONDS,
+    away: float = AWAY_SECONDS,
+) -> Split:
+    """Each gap between consecutive records: busy, the person's turn, a gate, or not counted.
+
+    A gap that ends in a prompt while no tool runs is the person's, up to `away`; so is an open
+    question or plan to approve (a gate). Any other gap is busy when it is at most `idle`, or
+    when a tool runs through it and it is at most `tool_cap`.
+    """
+    running: set[str] = set()
+    asking: set[str] = set()
+    found = Split([], [], [])
+    for (start, entry), (end, following) in pairwise(entries):
+        done = tool_results(entry)
+        running = (running | tool_uses(entry, waiting=False)) - done
+        asking = (asking | tool_uses(entry, waiting=True)) - done
+        gap = end - start
+        if asking:
+            found.gates.extend([(start, end)] if gap <= away else [])
+            continue
+        if is_prompt(following) and not running:
+            found.person.extend([(start, end)] if gap <= away else [])
+            continue
+        if gap <= idle or (running and gap <= tool_cap):
+            found.busy.append((start, end))
+    return found
+
+
 def busy(
-    entries: list[tuple[float, dict[str, Any]]], idle: float, tool_cap: float
+    entries: list[tuple[float, dict[str, Any]]], idle: float, tool_cap: float = TOOL_CAP_SECONDS
 ) -> list[Interval]:
     """The intervals between consecutive records in which the transcript was active."""
-    running: set[str] = set()
-    found = []
-    for (start, entry), (end, _) in pairwise(entries):
-        running |= tool_ids(entry, "tool_use", "id")
-        running -= tool_ids(entry, "tool_result", "tool_use_id")
-        gap = end - start
-        if gap <= idle or (running and gap <= tool_cap):
-            found.append((start, end))
-    return found
+    return split(entries, idle, tool_cap).busy
 
 
 def clip(intervals: Iterable[Interval], start: float, end: float | None) -> list[Interval]:
@@ -217,10 +289,13 @@ def measure(
     projects: Path | None = None,
     idle: float = IDLE_SECONDS,
     tool_cap: float = TOOL_CAP_SECONDS,
+    away: float = AWAY_SECONDS,
 ) -> ActiveTime:
     work_log = work_log or harness_home() / "work.jsonl"
     projects = projects or projects_dir()
     lead: list[Interval] = []
+    person: list[Interval] = []
+    gates: list[Interval] = []
     agents: dict[Path, list[Interval]] = {}
     sessions = set()
     filed = filed_runs(runs or runs_log())
@@ -228,7 +303,10 @@ def measure(
         if window.transcript is None:
             continue
         sessions.add(window.session)
-        lead += clip(busy(records(window.transcript), idle, tool_cap), window.start, window.end)
+        found_lead = split(records(window.transcript), idle, tool_cap, away)
+        lead += clip(found_lead.busy, window.start, window.end)
+        person += clip(found_lead.person, window.start, window.end)
+        gates += clip(found_lead.gates, window.start, window.end)
         for path in sorted(window.transcript.with_suffix("").glob("subagents/agent-*.jsonl")):
             if filed.get(path.stem.removeprefix("agent-"), ("", ticket))[1] != ticket:
                 continue
@@ -248,6 +326,8 @@ def measure(
         lead_seconds=union(lead),
         agent_seconds=union(agent_intervals),
         total_seconds=union(every),
+        person_seconds=union(person + gates),
+        gate_seconds=union(gates),
         sessions=len(sessions),
         agents=sum(1 for found in agents.values() if found),
         first=min((a for a, _ in every), default=None),
