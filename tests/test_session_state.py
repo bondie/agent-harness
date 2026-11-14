@@ -465,3 +465,90 @@ def test_the_hook_is_registered_for_subagent_start_and_stop():
     for name in ("SubagentStart", "SubagentStop"):
         commands = [hook["command"] for entry in hooks[name] for hook in entry["hooks"]]
         assert any("session_state.py" in command for command in commands), name
+
+
+def work_lines(home: Path) -> list[dict[str, Any]]:
+    path = home / "work.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "/agent-harness:ticket SHOP-12",
+        "  /ticket SHOP-12 and estimate it",
+        "/agent-harness:work SHOP-12",
+        "/agent-harness:ticket UTF-8 bug in SHOP-12",
+        "<command-message>agent-harness:ticket</command-message>\n"
+        "<command-name>/agent-harness:ticket</command-name>\n<command-args>SHOP-12</command-args>",
+    ],
+)
+def test_a_typed_ticket_or_work_command_marks_the_ticket(repo, home, environ, prompt):
+    typed = event("UserPromptSubmit", repo, prompt=prompt, transcript_path="/t/s-1.jsonl")
+    session_state.record(typed, environ, now=START)
+
+    assert work_lines(home) == [
+        {
+            "session": "s-1",
+            "ticket": "SHOP-12",
+            "at": session_state.stamp(START),
+            "transcript": "/t/s-1.jsonl",
+        }
+    ]
+    assert state_file(home)["ticket"] == "SHOP-12"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "look at SHOP-12",
+        "what does /agent-harness:ticket SHOP-12 do?",
+        "/agent-harness:stats SHOP-12",
+        "/agent-harness:ticket",
+    ],
+)
+def test_other_prompts_mark_nothing(repo, home, environ, prompt):
+    session_state.record(event("UserPromptSubmit", repo, prompt=prompt), environ, now=START)
+
+    assert not (home / "work.jsonl").exists()
+    assert "ticket" not in state_file(home)
+
+
+def test_work_stop_ends_the_ticket(repo, home, environ):
+    start = event("UserPromptSubmit", repo, prompt="/agent-harness:work SHOP-12")
+    session_state.record(start, environ, now=START)
+    stop = event("UserPromptSubmit", repo, prompt="/agent-harness:work stop SHOP-12")
+    session_state.record(stop, environ, now=START + 1)
+    called = {"skill": "agent-harness:work", "args": "Stop"}
+    session_state.record(
+        event("PreToolUse", repo, tool_name="Skill", tool_input=called), environ, now=START + 2
+    )
+
+    assert [line["ticket"] for line in work_lines(home)] == ["SHOP-12", None, None]
+    assert state_file(home)["ticket"] is None
+
+
+def test_the_main_sessions_skill_call_marks_the_ticket_once(repo, home, environ):
+    tool_input = {"skill": "agent-harness:ticket", "args": "SHOP-12"}
+    for name in ("PreToolUse", "PostToolUse"):
+        call = event(name, repo, tool_name="Skill", tool_input=tool_input)
+        session_state.record(call, environ, now=START)
+
+    assert [line["ticket"] for line in work_lines(home)] == ["SHOP-12"]
+
+
+@pytest.mark.parametrize("skill", ["ticket", "work", "other:ticket"])
+def test_a_skill_call_of_another_ticket_or_work_skill_marks_nothing(repo, home, environ, skill):
+    call = event("PreToolUse", repo, tool_name="Skill", tool_input={"skill": skill, "args": "X-1"})
+    session_state.record(call, environ, now=START)
+
+    assert not (home / "work.jsonl").exists()
+
+
+def test_a_subagents_skill_call_marks_nothing(repo, home, environ):
+    tool_input = {"skill": "agent-harness:ticket", "args": "SHOP-12"}
+    session_state.record(
+        subagent("PreToolUse", repo, tool_name="Skill", tool_input=tool_input), environ, now=START
+    )
+
+    assert not (home / "work.jsonl").exists()

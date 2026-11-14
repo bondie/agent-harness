@@ -23,3 +23,4 @@ def hook_module(name: str):
 
 def test_hooks_and_package_skip_the_same_standard_names() -> None:
     assert hook_module("save_artifacts").NOT_TICKET_PREFIXES == artifacts.NOT_TICKET_PREFIXES
+    assert hook_module("session_state").NOT_TICKET_PREFIXES == artifacts.NOT_TICKET_PREFIXES

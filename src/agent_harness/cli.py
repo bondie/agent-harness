@@ -19,7 +19,7 @@ from ticket_precedent.config import (
 from ticket_precedent.search import Searcher
 from ticket_precedent.store import Store
 
-from . import memory, prospective, team
+from . import activetime, memory, prospective, team
 from .artifacts import (
     DISPOSITIONS,
     SOURCES,
@@ -166,6 +166,20 @@ def _team_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]
         help=f"repeatable, replaces the default {' '.join(DEFAULT_TEST_PATTERNS)}",
     )
     cmd.set_defaults(handler=_export_case)
+
+    cmd = commands.add_parser(
+        "active-time", help="how long sessions and agents were busy on a ticket, from transcripts"
+    )
+    cmd.add_argument("key", help="ticket key the work markers name")
+    cmd.add_argument(
+        "--idle",
+        type=float,
+        default=activetime.IDLE_SECONDS / 60,
+        metavar="MINUTES",
+        help="a longer gap between records does not count (default: %(default)g)",
+    )
+    cmd.add_argument("--json", action="store_true", help="JSON instead of a line of text")
+    cmd.set_defaults(handler=_active_time)
 
     cmd = commands.add_parser("eval", help="errors of the exported estimates against the actuals")
     cmd.add_argument(
@@ -373,9 +387,14 @@ def _export_case(args: argparse.Namespace) -> int:
         found_diff = diff(found, args.test_pattern or DEFAULT_TEST_PATTERNS).as_json()
     analysis = read_object(directory / "analysis.json")
     case = prospective.eval_case(args.key, estimate, analysis, actual, found_diff)
+    active = activetime.measure(args.key)
+    if active.total_seconds:
+        case["active_time"] = active.as_json()
     target = harness_home() / "eval-cases" / f"{args.key}.json"
     write_json(target, case)
     outcome = {"ticket": args.key, "actual": actual, "diff": found_diff, "exported_at": _now()}
+    if "active_time" in case:
+        outcome["active_time"] = case["active_time"]
     write_json(directory / "outcome.json", outcome)
     estimated = prospective.case_total(case)
     kept = " (stated total, the estimate check failed)" if case.get("check_errors") else ""
@@ -400,6 +419,28 @@ def files_by_key(
         for key, repo_changes in changes_by_term(repo, keys, rev).items():
             found[key] += repo_changes
     return {key: list(diff(key_changes).files) for key, key_changes in found.items()}
+
+
+def _active_time(args: argparse.Namespace) -> int:
+    if args.idle <= 0:
+        raise ValueError("--idle must be a positive number of minutes")
+    active = activetime.measure(args.key, idle=args.idle * 60)
+    if args.json:
+        print(json.dumps(active.as_json(), indent=2, ensure_ascii=False))
+        return 0
+    if not active.total_seconds:
+        print(f"{args.key}: no active time; no work marker or ticket run names it")
+        return 0
+    data = active.as_json()
+    print(
+        f"{args.key}: {data['total_hours']:g} h active (lead {data['lead_hours']:g} h, "
+        f"agents {data['agent_hours']:g} h, overlaps counted once) in {active.sessions} "
+        f"session(s) and {active.agents} agent run(s), {data['first']} to {data['last']}; "
+        f"gaps over {args.idle:g} min not counted"
+    )
+    if not active.sessions:
+        print("no work marker names it, so the lead session's time is missing")
+    return 0
 
 
 def _metrics(args: argparse.Namespace) -> int:
