@@ -20,7 +20,8 @@ Each denial appends a line without the command to `$HARNESS_HOME/guard-events.js
 Settings: built-in defaults, then `$HARNESS_HOME/guard.json` (default
 `~/.claude/agent-harness/guard.json`), then the `guard` key of the project's
 `.claude/agent-harness.json`. It catches mistakes; it is not a sandbox against deliberate
-evasion. Standard library only; on an internal error it allows the command and logs to stderr.
+evasion. Standard library only; on an internal error it denies a subagent's call and allows
+the main session's, logging to stderr.
 """
 
 from __future__ import annotations
@@ -1761,20 +1762,37 @@ def log_guard_event(
         print(f"{hook} could not log the guard event: {error!r}", file=sys.stderr)
 
 
-def main(
-    stdin: TextIO = sys.stdin,
-    stdout: TextIO = sys.stdout,
-    environ: Mapping[str, str] = os.environ,
-) -> int:
-    try:
-        event = json.load(stdin)
-        denial, warnings = check(event, environ)
-    except Exception as error:
+def internal_error(event: Any, error: Exception, stdout: TextIO, environ: Mapping[str, str]) -> int:
+    """Deny a subagent's call the guard could not check; allow the main session's."""
+    if not isinstance(event, dict) or not event.get("agent_type"):
         print(
             f"guard_shell.py allowed the command after an internal error: {error!r}",
             file=sys.stderr,
         )
         return 0
+    print(f"guard_shell.py denied the call after an internal error: {error!r}", file=sys.stderr)
+    denial = Denial(
+        "guard_error",
+        f"the guard could not check this call ({type(error).__name__}: {error})",
+        "report the error to the lead and let it decide; the guard denies a subagent's "
+        "call it could not check.",
+    )
+    json.dump(deny(denial, []), stdout)
+    log_guard_event(environ, event, "guard_shell", "guard_error", "deny")
+    return 0
+
+
+def main(
+    stdin: TextIO = sys.stdin,
+    stdout: TextIO = sys.stdout,
+    environ: Mapping[str, str] = os.environ,
+) -> int:
+    event: Any = None
+    try:
+        event = json.load(stdin)
+        denial, warnings = check(event, environ)
+    except Exception as error:
+        return internal_error(event, error, stdout, environ)
     if denial is None:
         return 0
     json.dump(deny(denial, warnings), stdout)
