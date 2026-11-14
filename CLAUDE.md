@@ -1,6 +1,6 @@
 # agent-harness
 
-A Claude Code plugin (four subagents, the `ticket`, `retro` and `stats` skills, a dynamic
+A Claude Code plugin (four subagents, the `ticket`, `work`, `retro` and `stats` skills, a dynamic
 workflow, twelve hook scripts, an MCP server entry) and the Python package that backtests its
 estimator and measures the team.
 
@@ -10,7 +10,8 @@ estimator and measures the team.
   variants in the evaluation, so a change to it changes the measured results: rerun the eval.
 - `skills/ticket/SKILL.md`: the team-lead flow with the two approval gates;
   `skills/retro/SKILL.md` turns a finished ticket into approved memory lessons;
-  `skills/stats/SKILL.md` summarises the run log.
+  `skills/stats/SKILL.md` summarises the run log; `skills/work/SKILL.md` only acknowledges the
+  work marker that `session_state.py` logs for `harness-eval active-time`.
 - `workflows/*.js`: dynamic workflows shipped with the plugin (`/agent-harness:<name>`). Plain
   JavaScript, `meta` a pure literal, no clock or randomness; `tests/test_workflows.py` checks it.
 - `hooks/`: standard-library Python scripts called by `hooks/hooks.json`: the tracker, memory

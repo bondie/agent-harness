@@ -46,6 +46,7 @@ its own marketplace.
 | `/agent-harness:ticket KEY` | The team lead's playbook for the main session, with the two approval gates. |
 | `/agent-harness:stats` | Per agent: runs, typical duration, requests, tool calls and tokens, and the trend week over week, from the run log. `--by version\|model` groups each agent's runs by plugin version or model, `--split DATE` compares them before and after a moment such as a plugin update, `--memory` adds how much of a run was the agent's memory. |
 | `/agent-harness:retro KEY` | After the work is logged: compares the estimate and the plan with what happened; each agent proposes lessons for its memory and writes the ones the person approves. |
+| `/agent-harness:work KEY` | Marks the ticket this session works on, `stop` ends it, for `harness-eval active-time`. The playbook marks its ticket by itself. |
 | `/agent-harness:upgrade-impact` | A [dynamic workflow](https://code.claude.com/docs/en/workflows): before a dependency upgrade, one agent per component group reads the changelog in the version range and finds the changes your code uses; skeptics try to refute each risk. Returns the risks that survive, with `repo:path:line` and a test for each. |
 | `hooks/run_tests.py` | After each edit **by the implementer**, runs the tests of the repository the edited file is in and hands failures back to it. |
 | `hooks/guard_tracker_writes.py` | Denies tracker writes (comments, transitions, edits) to every subagent. |
@@ -460,6 +461,21 @@ call removes the stamp.
 increment. SessionStart removes the agents of a session it finds ended, and any agent folder
 whose files have not changed for a day (an agent whose SubagentStop never came).
 
+### Work markers
+
+A prompt that starts the ticket playbook (`/agent-harness:ticket SHOP-412`) or
+`/agent-harness:work SHOP-412`, and the main session's Skill call for either, marks the ticket
+the session works on: `ticket` and `ticket_since` in the state file, and a line in
+`$HARNESS_HOME/work.jsonl`:
+
+```json
+{"session": "<session_id>", "ticket": "SHOP-412", "at": "2026-11-14T09:12:40Z", "transcript": "<transcript_path>"}
+```
+
+`/agent-harness:work stop` writes `"ticket": null`. The branch a session runs on is not used:
+it names the directory the session started in, not the work, and one session often moves
+between tickets. A prompt that only mentions a key marks nothing.
+
 ## Permission bridge
 
 `hooks/permission_bridge.py` runs on PermissionRequest, which Claude Code fires while it shows the
@@ -851,6 +867,9 @@ uv run harness-eval escaped --commit 3f2a9c1 --repo ../shop --source sentry --re
 uv run harness-eval escaped --commit 3f2a9c1 --repo ../shop --case incident-12-http-5xx.yaml
 
 uv run harness-eval metrics --repo ../shop ../platform          # or --json
+
+# How long sessions and agents were busy on the ticket (export-case freezes it)
+uv run harness-eval active-time SHOP-412                         # --idle 10, --json
 ```
 
 - **`export-case KEY`** writes `$HARNESS_HOME/eval-cases/KEY.json`: the estimate and the
@@ -867,6 +886,21 @@ uv run harness-eval metrics --repo ../shop ../platform          # or --json
   changes but different author times count twice. An estimate the hook let through after its
   retries although the check still rejected it is exported with its stated total and the
   check's errors (`check_errors`). It also writes `outcome.json` into the ticket directory.
+- **`active-time KEY`** sums the time a session or an agent was busy on the ticket, from the
+  Claude Code transcripts ([Work markers](#work-markers)). A session counts from its marker
+  for the key until its next marker; inside that window its own records count, and so do those
+  of its subagents. A subagent run that `runs.jsonl` files under the key counts wherever it
+  ran. Two consecutive records of a transcript count as busy when they are at most `--idle`
+  minutes apart (5 by default), or when a tool call runs between them and the gap is at most an
+  hour; a longer gap does not count at all. An open question (AskUserQuestion, a plan to
+  approve) does not keep a transcript busy, but a tool call waiting at a permission prompt does,
+  up to that hour. A run that `runs.jsonl` files under another key does not count inside the
+  window. The lead, the
+  agents and the total are unions of intervals, so parallel agents and sessions count once.
+  It measures machine-side activity, not a person's hours, and it is not affected by how
+  time is logged. Claude Code deletes transcripts after 30 days by default
+  (`cleanupPeriodDays`), so `export-case` stores the result as `active_time` in the case and
+  in `outcome.json`. Without a marker only the agents' time is there, and the command says so.
 - **`eval [DIR]`** reports, for the total by estimate mode and for each part kind, the mean
   and the median absolute error in hours and the bias: estimate minus actual, so a positive
   bias means the estimates were too high. The total is computed from the parts (or the

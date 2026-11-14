@@ -11,7 +11,11 @@ permission prompt, `detail` holds its message) and `idle` (the turn ended, or th
 idle long enough for Claude Code's `idle_prompt`). A subagent's tool event only ends a wait
 its own prompt started (or a wait of unknown origin); a compaction keeps the state. SessionEnd
 removes the file; a session that ended without it is left for the viewer to drop by its `pid`,
-and the next SessionStart removes it (one without a `pid` after a day). Each running subagent
+and the next SessionStart removes it (one without a `pid` after a day). A prompt that starts the
+ticket playbook or `/agent-harness:work <KEY>`, or the main session's Skill call for either,
+marks the ticket the session works on: `ticket` in the state file, and a line in
+`$HARNESS_HOME/work.jsonl` that `harness-eval active-time` reads; `/agent-harness:work stop`
+ends it. Each running subagent
 also gets `$HARNESS_HOME/agents/<session>/<agent>.json` (type, start, tool calls, last tool)
 from SubagentStart to SubagentStop. TaskStop fires no SubagentStop, so the main session's
 TaskStop adds `stopped_at` to the file instead, for a viewer to offer resuming it; the agent's next
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Mapping
@@ -40,6 +45,32 @@ NOTIFICATION_STATES = {
 UNSAFE = frozenset("/\\\0")
 TURN_ENDS = {"Stop", "UserPromptSubmit", "SessionEnd", "SubagentStop"}
 TOOL_DONE = {"PostToolUse", "PostToolUseFailure"}
+WORK_SKILLS = {"agent-harness:ticket", "agent-harness:work"}
+TYPED = re.compile(r"/(?:agent-harness:)?(ticket|work)(?:\s+(.*))?", re.DOTALL)
+TAGGED = re.compile(
+    r"^(?:<command-message>[^<]*</command-message>\s*)?"
+    r"<command-name>\s*/(?:agent-harness:)?(ticket|work)\s*</command-name>"
+    r"(?:.*?<command-args>(.*?)</command-args>)?",
+    re.DOTALL,
+)
+KEY = re.compile(r"\b([A-Z][A-Z0-9]+)-\d+\b")
+# Key-shaped names of standards, as in agent_harness.artifacts; a test keeps them in step.
+NOT_TICKET_PREFIXES = (
+    "UTF",
+    "ISO",
+    "PSR",
+    "SHA",
+    "RFC",
+    "CVE",
+    "HTTP",
+    "TLS",
+    "X",
+    "ECMA",
+    "IEEE",
+    "UTC",
+    "GMT",
+)
+STOP = "stop"
 SAME_STATE_SECONDS = 2
 STALE_SECONDS = 24 * 3600
 
@@ -117,6 +148,47 @@ def mark_stopped_agent(event: Mapping[str, Any], environ: Mapping[str, str], mom
         return
     data |= {"stopped_at": stamp(moment), "updated_at": stamp(moment), "updated_epoch": moment}
     write(path, data)
+
+
+def work_marker(event: Mapping[str, Any]) -> str | None:
+    """The key a main-session prompt or Skill call starts work on, `STOP`, or None."""
+    found: tuple[str, str] | None = None
+    if event.get("hook_event_name") == "UserPromptSubmit" and isinstance(event.get("prompt"), str):
+        prompt = event["prompt"].strip()
+        match = TAGGED.search(prompt) if prompt.startswith("<") else TYPED.fullmatch(prompt)
+        found = (match.group(1), match.group(2) or "") if match else None
+    tool_input = event.get("tool_input")
+    if event.get("tool_name") == "Skill" and isinstance(tool_input, Mapping):
+        skill = str(tool_input.get("skill") or "")
+        found = (skill.removeprefix("agent-harness:"), str(tool_input.get("args") or ""))
+        found = found if skill in WORK_SKILLS else None
+    if found is None:
+        return None
+    skill, args = found
+    words = args.split()
+    if skill == "work" and words and words[0].lower() == STOP:
+        return STOP
+    keys = (key for key in KEY.finditer(args) if key.group(1) not in NOT_TICKET_PREFIXES)
+    return next((key.group(0) for key in keys), None)
+
+
+def mark_work(event: Mapping[str, Any], environ: Mapping[str, str], moment: float) -> str | None:
+    """Log the start or end of work on a ticket; the key, `STOP` or None when not a marker."""
+    marker = work_marker(event) if event.get("hook_event_name") != "PostToolUse" else None
+    if marker is None:
+        return None
+    line = {
+        "session": event.get("session_id"),
+        "ticket": None if marker == STOP else marker,
+        "at": stamp(moment),
+        "transcript": event.get("transcript_path"),
+    }
+    path = os.path.join(harness_home(environ), "work.jsonl")
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+    return marker
 
 
 def describe(tool: str | None, tool_input: Any) -> str | None:
@@ -389,6 +461,7 @@ def record(
         track_agent(event, environ, moment)
     if not agent and name == "PostToolUse":
         mark_stopped_agent(event, environ, moment)
+    marker = None if agent else mark_work(event, environ, moment)
     if name == "SessionEnd":
         if not agent and os.path.exists(path):
             os.remove(path)
@@ -400,7 +473,8 @@ def record(
     state, detail = found
     same_state = previous.get("state") == state
     unchanged = same_state and previous.get("detail") == detail
-    if unchanged and moment - float(previous.get("updated_epoch") or 0) < SAME_STATE_SECONDS:
+    recent = moment - float(previous.get("updated_epoch") or 0) < SAME_STATE_SECONDS
+    if unchanged and recent and marker is None:
         return previous
     cwd = previous.get("cwd") if agent or not isinstance(event.get("cwd"), str) else event["cwd"]
     data = dict(previous)
@@ -418,6 +492,8 @@ def record(
         "updated_at": stamp(moment),
         "updated_epoch": moment,
     }
+    if marker is not None:
+        data |= {"ticket": None if marker == STOP else marker, "ticket_since": stamp(moment)}
     write(path, data)
     if name == "SessionStart":
         remove_dead(path, moment)

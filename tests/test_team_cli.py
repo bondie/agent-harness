@@ -52,6 +52,8 @@ REVIEW = {
 def home(tmp_path, monkeypatch):
     path = tmp_path / "harness"
     monkeypatch.setenv("HARNESS_HOME", str(path))
+    monkeypatch.setenv("HARNESS_RUNS_LOG", str(tmp_path / "runs.jsonl"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     ticket = path / "tickets" / "SHOP-412"
     ticket.mkdir(parents=True)
     (ticket / "estimate.json").write_text(json.dumps(ESTIMATE))
