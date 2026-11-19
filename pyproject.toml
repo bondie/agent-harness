@@ -32,9 +32,9 @@ dev = [
     "mypy>=1.11",
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "ruff>=0.17.4",
+    "ruff>=0.17.5",
     "scipy-stubs>=1.13",
-    "types-pyyaml>=6.0",
+    "types-pyyaml>=6.0.12.20261113",
 ]
 
 [build-system]
