@@ -36,6 +36,8 @@ AGENT = "estimator"
 HANDBACK = "SubagentHandback"
 # "Retro for <KEY>", optionally after the "<KEY>: " every ticket task starts with.
 RETRO = re.compile(r"\s*(?:[A-Za-z][A-Za-z0-9]+-\d+\s*:\s*)?retro for\b", re.IGNORECASE)
+RESUMED = "The coordinator sent a message while you were working:"
+INTERRUPTED = "[Request interrupted by user"
 MAX_BLOCKS = 2
 MODES = ("bottom-up", "reference")
 KINDS = ("implementation", "verification", "release")
@@ -215,18 +217,52 @@ def _text(content: object) -> str:
     )
 
 
-def transcript_reports(path: object) -> tuple[str | None, str]:
-    """The report handed back through SubagentHandback, if any, and the last assistant text."""
+def _entries(path: object) -> list[dict[str, Any]]:
     if not isinstance(path, str) or not path or not Path(path).is_file():
-        return None, ""
-    handed_back: str | None = None
-    last = ""
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        return []
+    entries = []
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             entry = json.loads(line)
         except ValueError:
             continue
-        message = entry.get("message") if isinstance(entry, dict) else None
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _prompt(entry: dict[str, Any]) -> str | None:
+    """The text of a task or a coordinator message; None for reminders, interrupts, results."""
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if entry.get("type") != "user" or not isinstance(content, (str, list)):
+        return None
+    items = content if isinstance(content, list) else []
+    if any(isinstance(item, dict) and item.get("type") == "tool_result" for item in items):
+        return None
+    text = _text(content).strip()
+    if not text or text.startswith(INTERRUPTED):
+        return None
+    origin = entry.get("origin")
+    sender = origin.get("kind") if isinstance(origin, dict) else None
+    if entry.get("isMeta") is not True or sender == "coordinator" or text.startswith(RESUMED):
+        return text
+    return None
+
+
+def transcript_reports(path: object) -> tuple[str | None, str]:
+    """The current run's handed-back report, if any, and its last assistant text.
+
+    A run starts at the task or at a message from the coordinator, so a resumed estimator is
+    checked on its new report, not on the one it handed back before.
+    """
+    handed_back: str | None = None
+    last = ""
+    for entry in _entries(path):
+        if _prompt(entry) is not None:
+            handed_back, last = None, ""
+            continue
+        message = entry.get("message")
         if not isinstance(message, dict) or entry.get("type") != "assistant":
             continue
         content = message.get("content")
@@ -248,22 +284,19 @@ def _agent_transcript(event: Mapping[str, Any]) -> str | None:
 
 
 def is_retro(event: Mapping[str, Any]) -> bool:
-    """The run's task, its first user message, starts with "Retro for"."""
+    """The run's task, or the latest coordinator message, starts with "Retro for"."""
     path = _agent_transcript(event)
-    if path is None or not Path(path).is_file():
+    if path is None:
         return False
-    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            entry = json.loads(line)
-        except ValueError:
+    first, latest = "", ""
+    for entry in _entries(path):
+        text = _prompt(entry)
+        if text is None:
             continue
-        if not isinstance(entry, dict) or entry.get("type") != "user" or entry.get("isMeta"):
-            continue
-        message = entry.get("message")
-        task = _text(message.get("content") if isinstance(message, dict) else None)
-        if task.strip():
-            return RETRO.match(task) is not None
-    return False
+        latest = text.removeprefix(RESUMED).strip()
+        if not first and entry.get("isMeta") is not True:
+            first = text
+    return any(RETRO.match(task) is not None for task in (first, latest))
 
 
 def state_path(event: Mapping[str, Any], environ: Mapping[str, str]) -> Path:

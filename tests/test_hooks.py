@@ -1081,6 +1081,60 @@ def test_without_the_last_message_the_transcript_is_read(tmp_path):
     assert verdict["decision"] == "block"
 
 
+def resumed_estimator(
+    tmp_path: Path, message: str, *content: dict[str, Any], first: str | None = None
+) -> Path:
+    path = tmp_path / "subagents" / "agent-a1.jsonl"
+    path.parent.mkdir(exist_ok=True)
+    entries = [
+        {"type": "user", "message": {"content": "Estimate SHOP-412"}},
+        {"type": "assistant", "message": {"content": [handback(first or estimate_report())]}},
+        {
+            "type": "user",
+            "isMeta": True,
+            "origin": {"kind": "coordinator"},
+            "message": {
+                "content": f"The coordinator sent a message while you were working: {message}"
+            },
+        },
+        {"type": "assistant", "message": {"content": list(content)}},
+    ]
+    path.write_text("\n".join(map(json.dumps, entries)) + "\n")
+    return path
+
+
+def test_a_resumed_estimator_is_checked_on_its_new_report(tmp_path):
+    text = {"type": "text", "text": estimate_report(total=3)}
+    transcript = resumed_estimator(tmp_path, "Re-estimate SHOP-412", text)
+    event = estimator_stop(tmp_path, None, agent_transcript_path=str(transcript))
+
+    verdict = check_estimate(tmp_path, event)
+
+    assert verdict is not None
+    assert verdict["decision"] == "block"
+
+
+def test_a_retro_sent_to_a_resumed_estimator_is_not_checked(tmp_path):
+    text = {"type": "text", "text": estimate_report(total=3)}
+    invalid = estimate_report(total=3)
+    message = "Retro for SHOP-412: write these lines"
+    transcript = resumed_estimator(tmp_path, message, text, first=invalid)
+    event = estimator_stop(tmp_path, None, agent_transcript_path=str(transcript))
+
+    assert check_estimate(tmp_path, event) is None
+
+
+def test_save_artifacts_runs_when_a_handback_is_delivered():
+    config = json.loads((HOOKS / "hooks.json").read_text())
+    commands = [
+        handler["command"]
+        for group in config["hooks"]["PostToolUse"]
+        if group.get("matcher") == "SubagentHandback"
+        for handler in group["hooks"]
+    ]
+    assert any(command.endswith('/hooks/save_artifacts.py"') for command in commands)
+
+
 def estimator_handback(report: Any, tool: str = "SubagentHandback") -> dict[str, Any]:
     return {
         "hook_event_name": "PreToolUse",

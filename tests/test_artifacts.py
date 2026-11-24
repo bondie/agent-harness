@@ -506,3 +506,95 @@ def test_the_example_block_in_each_agent_prompt_follows_the_contract(
     block = read(ticket / f"{kind}.json")
     assert set(block) == keys
     assert {key for item in block[items] for key in item} == item_keys
+
+
+def coordinator(text: str, stamp: str = "2026-03-04T11:00:00Z") -> dict[str, Any]:
+    return user(text, stamp, isMeta=True, origin={"kind": "coordinator"})
+
+
+def test_a_coordinator_message_in_other_words_starts_a_run(tmp_path):
+    save(tmp_path, run_event(tmp_path, *FIRST_RUN))
+    message = coordinator("The coordinator sent you a message:\nRound 2")
+    event = run_event(tmp_path, *FIRST_RUN, message, handed_back("Round 2"))
+
+    ticket = save(tmp_path, event) / "SHOP-412"
+
+    reports = [(ticket / line["report"]).read_text() for line in index(ticket)]
+    assert reports == ["Round 1\n", "Round 2\n"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        user("[handback-send-enforce] Your report has not been delivered.", isMeta=True),
+        user("<system-reminder>Keep going</system-reminder>", isMeta=True),
+        user("Stop hook feedback: fix the block", isMeta=True),
+        user("[Request interrupted by user]"),
+    ],
+)
+def test_reminders_and_interrupts_do_not_start_a_run(tmp_path, entry):
+    entry = {**entry, "timestamp": "2026-03-04T10:30:00Z"}
+    draft = fenced("review", {**REVIEW, "verdict": "draft"})
+    entries = (user("Review SHOP-412"), said(f"Draft.\n{draft}"), entry)
+    save(tmp_path, run_event(tmp_path, *entries[:2]))
+    final = f"Final.\n{fenced('review', REVIEW)}"
+
+    ticket = save(tmp_path, at_handback(tmp_path, final, *entries)) / "SHOP-412"
+
+    [line] = index(ticket)
+    assert line["prompt_at"] == "2026-03-04T10:00:00Z"
+    assert (ticket / "reviewer-qa.01.md").read_text() == final + "\n"
+    assert not (ticket / "review.01.json").exists()
+
+
+def test_a_handback_that_repeats_the_last_report_is_saved(tmp_path):
+    save(tmp_path, run_event(tmp_path, *FIRST_RUN))
+
+    ticket = save(tmp_path, at_handback(tmp_path, "Round 1", *FIRST_RUN, resumed())) / "SHOP-412"
+
+    assert [line["report"] for line in index(ticket)] == ["reviewer-qa.01.md", "reviewer-qa.02.md"]
+
+
+def test_a_blocked_stop_replaces_an_older_line_without_a_prompt_time(tmp_path):
+    first = stop(tmp_path, "Draft.", agent="implementer")
+    first["agent_transcript_path"] = str(transcript(tmp_path, said("Draft.")))
+    save(tmp_path, first, HARNESS_TICKET="SHOP-412")
+    blocked = stop(tmp_path, "Fixed.", agent="implementer", stop_hook_active=True)
+
+    ticket = save(tmp_path, blocked) / "SHOP-412"
+
+    [line] = index(ticket)
+    assert (ticket / line["report"]).read_text() == "Fixed.\n"
+
+
+def test_the_handback_finds_the_transcript_next_to_the_session(tmp_path):
+    event = at_handback(tmp_path, "Report", user("Review SHOP-412"))
+    del event["agent_transcript_path"]
+    event["transcript_path"] = f"{tmp_path}.jsonl"
+
+    ticket = save(tmp_path, event) / "SHOP-412"
+
+    assert index(ticket)[0]["prompt_at"] == "2026-03-04T10:00:00Z"
+
+
+def test_a_stop_finds_its_handback_under_another_ticket(tmp_path):
+    entries = (user("Review the feed change"),)
+    report = f"Verdict.\n\n{fenced('review', REVIEW)}"
+    save(tmp_path, at_handback(tmp_path, report, *entries))
+    stale = run_event(tmp_path, *entries, said("Checking the diff."))
+
+    tickets = save(tmp_path, stale)
+
+    assert [path.name for path in tickets.iterdir()] == ["SHOP-412"]
+    [line] = index(tickets / "SHOP-412")
+    assert line["handback"] is True
+
+
+def test_every_message_of_a_retro_is_a_retro(tmp_path):
+    save(tmp_path, run_event(tmp_path, *FIRST_RUN))
+    message = user(RESUMED + "Retro for SHOP-412: write these approved lines", isMeta=True)
+    event = run_event(tmp_path, *FIRST_RUN, message, handed_back("Written."))
+
+    ticket = save(tmp_path, event) / "SHOP-412"
+
+    assert [line["report"] for line in index(ticket)] == ["reviewer-qa.01.md"]

@@ -12,9 +12,10 @@ the run, so the next stop of that agent replaces its report and index line. A ru
 the task or at a SendMessage from the coordinator, and only its own entries make the report.
 It also runs as PostToolUse on SubagentHandback and saves the delivered report from the tool
 input, because SubagentStop can read a transcript without the last message; a later stop of
-that run keeps the handed-back report. A retro run (task or latest message starting "Retro
-for") is not saved, so it cannot overwrite the ticket's artifacts. The retro,
-the evals and the metrics read these files instead of the conversation. Standard library
+that run keeps the handed-back report, which `handbacks.json` in the harness home locates.
+A retro run (task or latest message starting "Retro for") is not saved, so it cannot
+overwrite the ticket's artifacts. The retro, the evals and the metrics read these files
+instead of the conversation. Standard library
 only; it never blocks the session and tells the person when it cannot write the files.
 """
 
@@ -63,6 +64,9 @@ NOT_TICKET_PREFIXES = (
 RETRO = re.compile(r"\s*(?:[A-Za-z][A-Za-z0-9]+-\d+\s*:\s*)?retro for\b", re.IGNORECASE)
 # How Claude Code hands a SendMessage to a running or finished subagent.
 RESUMED = "The coordinator sent a message while you were working:"
+INTERRUPTED = "[Request interrupted by user"
+HANDBACKS = "handbacks.json"
+KEEP_SECONDS = 2 * 24 * 3600
 
 
 class Block(NamedTuple):
@@ -123,13 +127,20 @@ def task_prompt(entries: list[dict[str, Any]]) -> str:
 
 
 def is_prompt(entry: dict[str, Any]) -> bool:
-    """A task or a message from the coordinator, not a reminder or a tool result."""
-    if entry.get("type") != "user":
+    """A task or a message from the coordinator, not a reminder, an interrupt or a tool result."""
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if entry.get("type") != "user" or not isinstance(content, (str, list)):
         return False
-    text = text_of(entry.get("message") or {}).strip()
-    if not text:
+    items = content if isinstance(content, list) else []
+    if any(isinstance(item, dict) and item.get("type") == "tool_result" for item in items):
         return False
-    return entry.get("isMeta") is not True or text.startswith(RESUMED)
+    text = text_of(message).strip()
+    if not text or text.startswith(INTERRUPTED):
+        return False
+    origin = entry.get("origin")
+    sender = origin.get("kind") if isinstance(origin, dict) else None
+    return entry.get("isMeta") is not True or sender == "coordinator" or text.startswith(RESUMED)
 
 
 def current_run(
@@ -147,6 +158,65 @@ def is_retro(entries: list[dict[str, Any]]) -> bool:
     latest = text_of(prompt.get("message") or {}).strip() if prompt else ""
     tasks = (task_prompt(entries), latest.removeprefix(RESUMED))
     return any(RETRO.match(task) is not None for task in tasks)
+
+
+def prompt_time(entries: list[dict[str, Any]]) -> str | None:
+    """When the prompt that started the current run was sent; it identifies the run."""
+    prompt = current_run(entries)[1]
+    stamp = prompt.get("timestamp") if prompt else None
+    return stamp if isinstance(stamp, str) else None
+
+
+def read_handbacks(path: Path) -> dict[str, Any]:
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def handback_ticket(environ: Mapping[str, str], agent_id: Any, prompt_at: str | None) -> str | None:
+    """The ticket the run's handback went to, so that a stop of that run finds it."""
+    if prompt_at is None or not agent_id:
+        return None
+    saved = read_handbacks(harness_home(environ) / HANDBACKS).get(str(agent_id))
+    if not isinstance(saved, dict) or saved.get("prompt_at") != prompt_at:
+        return None
+    ticket = saved.get("ticket")
+    return ticket if isinstance(ticket, str) and SAFE_KEY.fullmatch(ticket) else None
+
+
+def remember_handback(
+    environ: Mapping[str, str], agent_id: Any, prompt_at: str | None, ticket: str
+) -> None:
+    if prompt_at is None or not agent_id:
+        return
+    home = harness_home(environ)
+    moment = datetime.now(UTC).timestamp()
+    with locked(home):
+        state = {
+            key: value
+            for key, value in read_handbacks(home / HANDBACKS).items()
+            if isinstance(value, dict)
+            and isinstance(value.get("at"), (int, float))
+            and moment - value["at"] < KEEP_SECONDS
+        }
+        state[str(agent_id)] = {"prompt_at": prompt_at, "ticket": ticket, "at": moment}
+        write_json(home / HANDBACKS, state)
+
+
+def run_ticket(
+    event: dict[str, Any],
+    entries: list[dict[str, Any]],
+    environ: Mapping[str, str],
+    report: str = "",
+) -> str:
+    """The run's ticket: at a stop, where the run's handback went, else `ticket_key`."""
+    if event.get("hook_event_name") == "SubagentStop":
+        ticket = handback_ticket(environ, event.get("agent_id"), prompt_time(entries))
+        if ticket:
+            return ticket
+    return ticket_key(event, entries, environ, report)
 
 
 def handed_back_report(event: dict[str, Any]) -> str:
@@ -361,7 +431,8 @@ def save(
                 overwrite = {kind for kind in run.line.get("blocks") or [] if isinstance(kind, str)}
         elif event.get("stop_hook_active") is True:
             previous = blocked_run(lines, agent, agent_id)
-        if previous is None and repeats(directory, last_run(lines, agent, agent_id), report):
+        stale = previous is None and not handback
+        if stale and repeats(directory, last_run(lines, agent, agent_id), report):
             print(
                 f"save_artifacts: {agent} {agent_id} repeated its last report; skipped",
                 file=sys.stderr,
@@ -424,10 +495,9 @@ def main(
         report = handed_back_report(event) if handback else final_report(entries, event)
         if not report.strip() or is_retro(entries):
             return 0
-        prompt = current_run(entries)[1]
-        stamp = prompt.get("timestamp") if prompt else None
-        prompt_at = stamp if isinstance(stamp, str) else None
-        directory = harness_home(environ) / "tickets" / ticket_key(event, entries, environ, report)
+        prompt_at = prompt_time(entries)
+        ticket = run_ticket(event, entries, environ, report)
+        directory = harness_home(environ) / "tickets" / ticket
         problem = unwritable(directory)
         if problem:
             message = f"agent-harness could not save the {agent} report: {problem}."
@@ -435,6 +505,8 @@ def main(
             print(f"save_artifacts: {problem}", file=sys.stderr)
             return 0
         save(directory, agent, event, report, prompt_at, handback)
+        if handback:
+            remember_handback(environ, event.get("agent_id"), prompt_at, ticket)
     except Exception as error:
         print(f"save_artifacts: {error}", file=sys.stderr)
     return 0
