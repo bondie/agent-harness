@@ -1222,3 +1222,22 @@ def test_bad_input_never_blocks_the_estimator(tmp_path, payload):
     )
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_a_compaction_summary_does_not_start_an_estimator_run(tmp_path):
+    path = tmp_path / "subagents" / "agent-a1.jsonl"
+    path.parent.mkdir(exist_ok=True)
+    summary = "This session is being continued from a previous conversation."
+    entries = [
+        {"type": "user", "message": {"content": "Estimate SHOP-412"}},
+        {"type": "assistant", "message": {"content": [handback(estimate_report(total=3))]}},
+        {"type": "user", "isCompactSummary": True, "message": {"content": summary}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}},
+    ]
+    path.write_text("\n".join(map(json.dumps, entries)) + "\n")
+    event = estimator_stop(tmp_path, None, agent_transcript_path=str(path))
+
+    verdict = check_estimate(tmp_path, event)
+
+    assert verdict is not None
+    assert "handed back already" in verdict["systemMessage"]
