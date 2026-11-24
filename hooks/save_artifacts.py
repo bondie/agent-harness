@@ -8,8 +8,12 @@ report as `<agent>.<NN>.md`, one line per run in `index.jsonl`, and every fenced
 The key is HARNESS_TICKET, else the `ticket` of the report's own structured block, else the
 first ticket key in the task prompt whose prefix is not in NOT_TICKET_PREFIXES (`UTF-8`,
 `SHA-256`), else `adhoc-<YYYYMMDD>-<short agent id>`. A stop that a hook blocked does not end
-the run, so the next stop of that agent replaces its report and index line. A retro run (task
-starting "Retro for") is not saved, so it cannot overwrite the ticket's artifacts. The retro,
+the run, so the next stop of that agent replaces its report and index line. A run starts at
+the task or at a SendMessage from the coordinator, and only its own entries make the report.
+It also runs as PostToolUse on SubagentHandback and saves the delivered report from the tool
+input, because SubagentStop can read a transcript without the last message; a later stop of
+that run keeps the handed-back report. A retro run (task or latest message starting "Retro
+for") is not saved, so it cannot overwrite the ticket's artifacts. The retro,
 the evals and the metrics read these files instead of the conversation. Standard library
 only; it never blocks the session and tells the person when it cannot write the files.
 """
@@ -57,6 +61,8 @@ NOT_TICKET_PREFIXES = (
 )
 # "Retro for <KEY>", optionally after the "<KEY>: " every ticket task starts with.
 RETRO = re.compile(r"\s*(?:[A-Za-z][A-Za-z0-9]+-\d+\s*:\s*)?retro for\b", re.IGNORECASE)
+# How Claude Code hands a SendMessage to a running or finished subagent.
+RESUMED = "The coordinator sent a message while you were working:"
 
 
 class Block(NamedTuple):
@@ -116,8 +122,37 @@ def task_prompt(entries: list[dict[str, Any]]) -> str:
     return ""
 
 
+def is_prompt(entry: dict[str, Any]) -> bool:
+    """A task or a message from the coordinator, not a reminder or a tool result."""
+    if entry.get("type") != "user":
+        return False
+    text = text_of(entry.get("message") or {}).strip()
+    if not text:
+        return False
+    return entry.get("isMeta") is not True or text.startswith(RESUMED)
+
+
+def current_run(
+    entries: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """The entries after the latest prompt, and that prompt: a resumed agent starts a new run."""
+    for number in range(len(entries) - 1, -1, -1):
+        if is_prompt(entries[number]):
+            return entries[number + 1 :], entries[number]
+    return entries, None
+
+
 def is_retro(entries: list[dict[str, Any]]) -> bool:
-    return RETRO.match(task_prompt(entries)) is not None
+    prompt = current_run(entries)[1]
+    latest = text_of(prompt.get("message") or {}).strip() if prompt else ""
+    tasks = (task_prompt(entries), latest.removeprefix(RESUMED))
+    return any(RETRO.match(task) is not None for task in tasks)
+
+
+def handed_back_report(event: dict[str, Any]) -> str:
+    tool_input = event.get("tool_input")
+    message = tool_input.get("message") if isinstance(tool_input, dict) else None
+    return message if isinstance(message, str) else ""
 
 
 def is_ticket(text: str) -> bool:
@@ -158,7 +193,7 @@ def ticket_key(
 
 def final_report(entries: list[dict[str, Any]], event: dict[str, Any]) -> str:
     report, report_id, handed_back = "", None, False
-    for entry in entries:
+    for entry in current_run(entries)[0]:
         message = entry.get("message")
         if entry.get("type") != "assistant" or not isinstance(message, dict):
             continue
@@ -243,14 +278,21 @@ def next_number(directory: Path, prefix: str, suffix: str) -> int:
     return max(numbers, default=0) + 1
 
 
-def write_block(directory: Path, kind: str, value: dict[str, Any]) -> None:
+def write_block(directory: Path, kind: str, value: dict[str, Any], keep: bool = True) -> None:
     latest = directory / f"{kind}.json"
-    if latest.exists():
+    if keep and latest.exists():
         latest.replace(directory / f"{kind}.{next_number(directory, kind, '.json'):02d}.json")
     write_json(latest, value)
 
 
-def blocked_run(lines: list[str], agent: str, agent_id: Any) -> tuple[int, str] | None:
+class Run(NamedTuple):
+    number: int
+    report: str
+    line: dict[str, Any]
+
+
+def last_run(lines: list[str], agent: str, agent_id: Any) -> Run | None:
+    """The agent's latest line in the index, when it names a report of that agent."""
     for number in range(len(lines) - 1, -1, -1):
         try:
             line = json.loads(lines[number])
@@ -262,9 +304,32 @@ def blocked_run(lines: list[str], agent: str, agent_id: Any) -> tuple[int, str] 
             continue
         report = line.get("report")
         if isinstance(report, str) and re.fullmatch(re.escape(agent) + r"\.\d+\.md", report):
-            return number, report
+            return Run(number, report, line)
         return None
     return None
+
+
+def blocked_run(lines: list[str], agent: str, agent_id: Any) -> tuple[int, str] | None:
+    run = last_run(lines, agent, agent_id)
+    return (run.number, run.report) if run else None
+
+
+def same_run(lines: list[str], agent: str, agent_id: Any, prompt_at: str | None) -> Run | None:
+    """The line saved earlier for the run that `prompt_at` started, if any."""
+    run = last_run(lines, agent, agent_id)
+    if prompt_at is None or run is None or run.line.get("prompt_at") != prompt_at:
+        return None
+    return run
+
+
+def repeats(directory: Path, run: Run | None, report: str) -> bool:
+    if run is None:
+        return False
+    try:
+        saved = (directory / run.report).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return saved.rstrip("\n") == report.rstrip("\n")
 
 
 def read_lines(path: Path) -> list[str]:
@@ -273,13 +338,35 @@ def read_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-def save(directory: Path, agent: str, event: dict[str, Any], report: str) -> None:
+def save(
+    directory: Path,
+    agent: str,
+    event: dict[str, Any],
+    report: str,
+    prompt_at: str | None = None,
+    handback: bool = False,
+) -> None:
     index = directory / "index.jsonl"
+    agent_id = event.get("agent_id")
     with locked(directory):
         lines = read_lines(index)
         previous = None
-        if event.get("stop_hook_active") is True:
-            previous = blocked_run(lines, agent, event.get("agent_id"))
+        overwrite: set[str] = set()
+        run = same_run(lines, agent, agent_id, prompt_at)
+        if run is not None:
+            if run.line.get("handback") is True and not handback:
+                return
+            previous = (run.number, run.report)
+            if event.get("stop_hook_active") is not True:
+                overwrite = {kind for kind in run.line.get("blocks") or [] if isinstance(kind, str)}
+        elif event.get("stop_hook_active") is True:
+            previous = blocked_run(lines, agent, agent_id)
+        if previous is None and repeats(directory, last_run(lines, agent, agent_id), report):
+            print(
+                f"save_artifacts: {agent} {agent_id} repeated its last report; skipped",
+                file=sys.stderr,
+            )
+            return
         name = f"{agent}.{next_number(directory, agent, '.md'):02d}.md"
         if previous:
             name = previous[1]
@@ -290,16 +377,21 @@ def save(directory: Path, agent: str, event: dict[str, Any], report: str) -> Non
             if block.value is None:
                 errors[block.kind] = block.error
                 continue
-            write_block(directory, block.kind, block.value)
+            write_block(directory, block.kind, block.value, keep=block.kind not in overwrite)
+            overwrite.discard(block.kind)
             if block.kind not in kinds:
                 kinds.append(block.kind)
         line: dict[str, Any] = {
             "agent": agent,
-            "agent_id": event.get("agent_id"),
+            "agent_id": agent_id,
             "ended": now(),
             "report": name,
             "blocks": kinds,
         }
+        if prompt_at is not None:
+            line["prompt_at"] = prompt_at
+        if handback:
+            line["handback"] = True
         if errors:
             line["error"] = errors
         text = json.dumps(line, ensure_ascii=False)
@@ -325,10 +417,16 @@ def main(
         agent = agent_name(event.get("agent_type"))
         if agent is None:
             return 0
-        entries = read_transcript(event.get("agent_transcript_path"))
-        report = final_report(entries, event)
+        handback = event.get("hook_event_name") == "PostToolUse"
+        if handback and event.get("tool_name") != HANDBACK:
+            return 0
+        entries = read_transcript(agent_transcript(event))
+        report = handed_back_report(event) if handback else final_report(entries, event)
         if not report.strip() or is_retro(entries):
             return 0
+        prompt = current_run(entries)[1]
+        stamp = prompt.get("timestamp") if prompt else None
+        prompt_at = stamp if isinstance(stamp, str) else None
         directory = harness_home(environ) / "tickets" / ticket_key(event, entries, environ, report)
         problem = unwritable(directory)
         if problem:
@@ -336,7 +434,7 @@ def main(
             json.dump({"systemMessage": message}, stdout)
             print(f"save_artifacts: {problem}", file=sys.stderr)
             return 0
-        save(directory, agent, event, report)
+        save(directory, agent, event, report, prompt_at, handback)
     except Exception as error:
         print(f"save_artifacts: {error}", file=sys.stderr)
     return 0

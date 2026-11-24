@@ -18,7 +18,9 @@ estimator and measures the team.
   and shell guards (PreToolUse), `guard_runaway.py` (PreToolUse, PostToolUse and
   PostToolUseFailure on every tool), `run_tests.py` (PostToolUse), `log_agent_runs.py`,
   `save_artifacts.py`, `quality_gate.py`, `estimate_check.py` and `memory_cap.py`
-  (SubagentStop). The last three also run as PreToolUse on `SubagentHandback`, where auto mode
+  (SubagentStop). `save_artifacts.py` also runs as PostToolUse on `SubagentHandback` and saves
+  the delivered report from `tool_input`, because the transcript a stop reads can lag behind
+  the last message. The last three also run as PreToolUse on `SubagentHandback`, where auto mode
   delivers a report before the subagent stops; both paths share one block count per run.
   `session_state.py` (SessionStart, UserPromptSubmit, Notification, Stop, SessionEnd) keeps a
   state file per main session for a viewer; `guard_runaway.py` updates it on the main session's
