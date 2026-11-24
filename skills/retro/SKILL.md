@@ -81,9 +81,10 @@ remembered rejection can hide the next real finding.
 ## 4. Write the approved lines
 
 Send each agent with approved lines or moves, in its retro run from step 2 (SendMessage to that
-agent): "Write these approved lines to your memory exactly as given, make these approved
-verbatim moves, and make these approved changes and deletions: …". If you start a new run
-instead, begin its task with `Retro for <KEY>` too, so the hooks treat it as a retro. A hook
+agent): "Retro for <KEY>: write these approved lines to your memory exactly as given, make
+these approved verbatim moves, and make these approved changes and deletions: …". Every message
+of a retro starts with `Retro for <KEY>`, and so does the task of a new run if you start one,
+so the hooks treat it as a retro. A hook
 denies a line without source and date and a file over its size cap. A verbatim move, whole
 lessons with the same wording and the same `(source: …)` into a topic file linked from
 `MEMORY.md`, is not a compaction: outside a retro the agent makes it itself and lists the moved

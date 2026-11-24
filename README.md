@@ -124,11 +124,13 @@ whose tracker key prefix is one of those standards (`ISO`, `RFC`, `CVE`, `UTC`, 
 optionally after `<KEY>:`) is not saved, gated or estimate-checked.
 
 A run starts at the agent's task or at a message sent to it with SendMessage, so a resumed
-agent adds a run and never reports its previous one again; a retro sent that way is not saved
-either. A report delivered through `SubagentHandback` is saved when the tool returns, from the
-tool's input. Claude Code can run SubagentStop before the agent's last message reaches its
-transcript, so the stop then keeps the handed-back report instead of reading the transcript,
-and a new run whose report repeats the agent's previous one byte for byte is skipped.
+agent adds a run and never reports its previous one again. A retro sent that way is not saved
+either, as long as each of its messages starts with "Retro for <KEY>". A report delivered
+through `SubagentHandback` is saved when the tool returns, from the tool's input. Claude Code
+can run SubagentStop before the agent's last message reaches its transcript, so the stop then
+keeps the handed-back report instead of reading the transcript, also when that handback went
+to another ticket directory (`handbacks.json` remembers where), and a stop that would start a
+new run with a report repeating the agent's previous one byte for byte is skipped.
 
 | File | Content |
 |---|---|

@@ -55,8 +55,8 @@ from save_artifacts import (
     locked,
     now,
     read_transcript,
+    run_ticket,
     structured_blocks,
-    ticket_key,
     unwritable,
     write_json,
 )
@@ -492,7 +492,7 @@ def gate(event: dict[str, Any], environ: Mapping[str, str], stdout: TextIO) -> N
     if is_retro(entries):
         return
     report = handed_back_report(event) if at_handback else final_report(entries, event)
-    key = ticket_key(event, entries, environ, report)
+    key = run_ticket(event, entries, environ, report)
     directory = harness_home(environ) / "tickets" / key
     agent_id = str(event.get("agent_id") or "")
     if not at_handback and checked_at_handback(directory, agent_id):
