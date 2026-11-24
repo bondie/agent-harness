@@ -712,7 +712,9 @@ def test_a_stop_finds_the_delivered_handback_under_the_reports_ticket(tmp_path, 
     transcript(tmp_path, user("Implement the feed change"), name="agent-i1")
     assert gate(tmp_path, handing) is None
     delivered = {**handing, "hook_event_name": "PostToolUse"}
-    saved = hook("save_artifacts.py", delivered, HARNESS_HOME=str(tmp_path / "home"))
+    saved = hook(
+        "save_artifacts.py", delivered, HARNESS_HOME=str(tmp_path / "home"), HARNESS_TICKET=""
+    )
     assert saved.returncode == 0
 
     configure(repo, [{"cmd": check("lint", 1)}])
