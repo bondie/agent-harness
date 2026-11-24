@@ -123,9 +123,16 @@ whose tracker key prefix is one of those standards (`ISO`, `RFC`, `CVE`, `UTC`, 
 `NOT_TICKET_PREFIXES`) must set `HARNESS_TICKET`. A retro run (task starting "Retro for",
 optionally after `<KEY>:`) is not saved, gated or estimate-checked.
 
+A run starts at the agent's task or at a message sent to it with SendMessage, so a resumed
+agent adds a run and never reports its previous one again; a retro sent that way is not saved
+either. A report delivered through `SubagentHandback` is saved when the tool returns, from the
+tool's input. Claude Code can run SubagentStop before the agent's last message reaches its
+transcript, so the stop then keeps the handed-back report instead of reading the transcript,
+and a new run whose report repeats the agent's previous one byte for byte is skipped.
+
 | File | Content |
 |---|---|
-| `index.jsonl` | One line per finished run: the agent, its id, when it ended, its report file, the kinds of its structured blocks, and under `error` the reason for each block it could not read. |
+| `index.jsonl` | One line per finished run: the agent, its id, when it ended, its report file, the kinds of its structured blocks, the time of the prompt that started the run (`prompt_at`), `handback` when the report came through `SubagentHandback`, and under `error` the reason for each block it could not read. |
 | `<agent>.<NN>.md` | The final report of each run, numbered per agent. |
 | `<kind>.json` | The latest structured block of a kind (`analysis`, `estimate`, `review`, `implementation`); the previous one moves to `<kind>.<NN>.json`. |
 | `gates.json` | The latest quality gate result: the commands, their exit codes, durations and the last 40 lines of their output. |

@@ -280,14 +280,114 @@ def test_a_stop_after_a_blocked_stop_replaces_the_run(tmp_path):
     assert read(ticket / "implementation.01.json") == {"files": ["a.py"]}
 
 
+RESUMED = "The coordinator sent a message while you were working: "
+FIRST_RUN = (user("Review SHOP-412"), handed_back("Round 1"))
+
+
+def resumed(stamp: str = "2026-03-04T11:00:00Z") -> dict[str, Any]:
+    return user(RESUMED + "Round 2, check the fixes", stamp, isMeta=True)
+
+
+def run_event(tmp_path: Path, *entries: dict[str, Any], **fields: Any) -> dict[str, Any]:
+    event = stop(tmp_path, **fields)
+    event["agent_transcript_path"] = str(transcript(tmp_path, *entries))
+    return event
+
+
+def at_handback(tmp_path: Path, report: str, *entries: dict[str, Any]) -> dict[str, Any]:
+    event = run_event(tmp_path, *entries, hook_event_name="PostToolUse")
+    event.update(tool_name="SubagentHandback", tool_input={"message": report})
+    return event
+
+
 def test_a_resumed_agent_adds_a_run(tmp_path):
-    save(tmp_path, stop(tmp_path, "Round 1", agent="implementer"))
-    ticket = save(tmp_path, stop(tmp_path, "Round 2", agent="implementer")) / "SHOP-412"
+    save(tmp_path, run_event(tmp_path, *FIRST_RUN))
+    event = run_event(tmp_path, *FIRST_RUN, resumed(), handed_back("Round 2"))
+    ticket = save(tmp_path, event) / "SHOP-412"
 
     assert [line["report"] for line in index(ticket)] == [
-        "implementer.01.md",
-        "implementer.02.md",
+        "reviewer-qa.01.md",
+        "reviewer-qa.02.md",
     ]
+    assert (ticket / "reviewer-qa.02.md").read_text() == "Round 2\n"
+
+
+@pytest.mark.parametrize(
+    ("last", "saved"), [(None, ["Round 1"]), ("Round 2", ["Round 1", "Round 2"])]
+)
+def test_a_stale_transcript_never_saves_the_previous_runs_report(tmp_path, last, saved):
+    save(tmp_path, run_event(tmp_path, *FIRST_RUN))
+    event = run_event(tmp_path, *FIRST_RUN, resumed(), said("Checking", "m5"))
+    event["agent_transcript_path"] = str(transcript(tmp_path, *FIRST_RUN, resumed()))
+    if last:
+        event["last_assistant_message"] = last
+
+    ticket = save(tmp_path, event) / "SHOP-412"
+
+    reports = [(ticket / line["report"]).read_text() for line in index(ticket)]
+    assert reports == [f"{text}\n" for text in saved]
+
+
+def test_the_handback_is_saved_when_it_is_delivered(tmp_path):
+    report = f"Verdict: approve.\n\n{fenced('review', REVIEW)}"
+    ticket = save(tmp_path, at_handback(tmp_path, report, user("Review SHOP-412"))) / "SHOP-412"
+
+    [line] = index(ticket)
+    assert line["handback"] is True
+    assert line["prompt_at"] == "2026-03-04T10:00:00Z"
+    assert (ticket / "reviewer-qa.01.md").read_text() == report + "\n"
+    assert read(ticket / "review.json") == REVIEW
+
+
+def test_a_stop_after_the_handback_keeps_the_handed_back_report(tmp_path):
+    save(tmp_path, at_handback(tmp_path, "Round 2", *FIRST_RUN[:1], resumed()))
+    stale = run_event(tmp_path, *FIRST_RUN[:1], resumed(), last_assistant_message="Let me check.")
+
+    ticket = save(tmp_path, stale) / "SHOP-412"
+
+    [line] = index(ticket)
+    assert (ticket / line["report"]).read_text() == "Round 2\n"
+
+
+def test_a_handback_after_a_stop_in_the_same_run_replaces_it_and_its_blocks(tmp_path):
+    first = fenced("review", {**REVIEW, "verdict": "draft"})
+    save(tmp_path, run_event(tmp_path, user("Review SHOP-412"), said(f"Draft.\n{first}")))
+    final = f"Final.\n{fenced('review', REVIEW)}"
+
+    ticket = save(tmp_path, at_handback(tmp_path, final, user("Review SHOP-412"))) / "SHOP-412"
+
+    [line] = index(ticket)
+    assert line["handback"] is True
+    assert (ticket / "reviewer-qa.01.md").read_text() == final + "\n"
+    assert read(ticket / "review.json") == REVIEW
+    assert not (ticket / "review.01.json").exists()
+
+
+def test_a_new_run_that_repeats_the_last_report_is_skipped(tmp_path):
+    save(tmp_path, run_event(tmp_path, *FIRST_RUN))
+    event = run_event(tmp_path, *FIRST_RUN, resumed(), handed_back("Round 1"))
+
+    ticket = save(tmp_path, event) / "SHOP-412"
+
+    assert [line["report"] for line in index(ticket)] == ["reviewer-qa.01.md"]
+
+
+def test_other_tools_after_use_save_nothing(tmp_path):
+    event = at_handback(tmp_path, "Report", user("Review SHOP-412"))
+    event["tool_name"] = "Edit"
+    assert not save(tmp_path, event).exists()
+
+
+def test_a_retro_sent_to_a_finished_agent_saves_nothing(tmp_path):
+    save(tmp_path, run_event(tmp_path, *FIRST_RUN))
+    retro = user(
+        RESUMED + "Retro for SHOP-412. Do not write yet.", "2026-03-05T10:00:00Z", isMeta=True
+    )
+    event = run_event(tmp_path, *FIRST_RUN, retro, handed_back("Lessons"))
+
+    ticket = save(tmp_path, event) / "SHOP-412"
+
+    assert [line["report"] for line in index(ticket)] == ["reviewer-qa.01.md"]
 
 
 def test_a_blocked_stop_without_an_earlier_run_adds_one(tmp_path):
