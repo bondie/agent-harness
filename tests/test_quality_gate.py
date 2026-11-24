@@ -701,3 +701,23 @@ def test_the_ticket_skips_standards_and_prefers_the_block(tmp_path, check, promp
 
     assert gate(tmp_path, event) is None
     assert [path.name for path in (tmp_path / "home/tickets").iterdir()] == [key]
+
+
+def test_a_stop_finds_the_delivered_handback_under_the_reports_ticket(tmp_path, check):
+    repo = git_repository(tmp_path / "shop")
+    configure(repo, [{"cmd": check("lint")}])
+    touch(repo, "src/shop.py")
+    report = "Done.\n\n" + fenced("implementation", {"ticket": "SHOP-412", "files": []})
+    handing = handing_back(tmp_path, repo, report)
+    transcript(tmp_path, user("Implement the feed change"), name="agent-i1")
+    assert gate(tmp_path, handing) is None
+    delivered = {**handing, "hook_event_name": "PostToolUse"}
+    saved = hook("save_artifacts.py", delivered, HARNESS_HOME=str(tmp_path / "home"))
+    assert saved.returncode == 0
+
+    configure(repo, [{"cmd": check("lint", 1)}])
+    stop = finished(tmp_path, repo, "Checking the diff.")
+    path = transcript(tmp_path, user("Implement the feed change"), name="agent-i1")
+    stop["agent_transcript_path"] = str(path)
+
+    assert gate(tmp_path, stop) is None

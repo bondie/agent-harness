@@ -8,9 +8,10 @@ hour. A block that is missing or breaks a rule (an adjustment without a citation
 without evidence, a total that differs from the computed one) keeps the estimator running
 with the errors as its next instruction, at most twice per run; after that the hook lets it
 stop and warns the person, and the count starts over only when the agent runs again. Reports
-without an "Estimate:" line (a recorded correction) and retro runs (task starting "Retro for")
-are not checked. When the hook cannot record its count, it lets the report through and says
-so.
+without an "Estimate:" line (a recorded correction) and retro runs (task or latest
+coordinator message starting "Retro for") are not checked. A run starts at the task or at a
+coordinator message, so a resumed estimator is checked on its new report. When the hook
+cannot record its count, it lets the report through and says so.
 
 In auto mode the estimator delivers its report through SubagentHandback before it stops, so
 the same check runs as a PreToolUse hook on that tool and denies the call; the two paths share
@@ -236,6 +237,8 @@ def _prompt(entry: dict[str, Any]) -> str | None:
     message = entry.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if entry.get("type") != "user" or not isinstance(content, (str, list)):
+        return None
+    if entry.get("isCompactSummary") is True:
         return None
     items = content if isinstance(content, list) else []
     if any(isinstance(item, dict) and item.get("type") == "tool_result" for item in items):

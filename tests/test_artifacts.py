@@ -598,3 +598,56 @@ def test_every_message_of_a_retro_is_a_retro(tmp_path):
     ticket = save(tmp_path, event) / "SHOP-412"
 
     assert [line["report"] for line in index(ticket)] == ["reviewer-qa.01.md"]
+
+
+KEYLESS = (user("Review the feed change"),)
+
+
+def test_a_later_run_of_the_agent_is_not_routed_to_an_earlier_handback(tmp_path):
+    save(tmp_path, at_handback(tmp_path, f"Verdict.\n\n{fenced('review', REVIEW)}", *KEYLESS))
+    stale = run_event(tmp_path, *KEYLESS, resumed(), said("Checking the diff."))
+
+    tickets = save(tmp_path, stale)
+
+    assert sorted(path.name for path in tickets.iterdir()) == ["SHOP-412", "adhoc-20260304-a1"]
+    assert len(index(tickets / "SHOP-412")) == 1
+
+
+def test_old_handbacks_are_forgotten(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    old = {"prompt_at": "2026-01-01T00:00:00Z", "ticket": "SHOP-1", "at": 0}
+    (home / "handbacks.json").write_text(json.dumps({"old-agent": old}))
+
+    save(tmp_path, at_handback(tmp_path, "Report", user("Review SHOP-412")))
+
+    assert set(read(home / "handbacks.json")) == {"a1"}
+
+
+def test_an_unsafe_ticket_in_the_handbacks_is_ignored(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    entry = {"prompt_at": "2026-03-04T10:00:00Z", "ticket": "../escape", "at": 4102444800}
+    (home / "handbacks.json").write_text(json.dumps({"a1": entry}))
+
+    tickets = save(tmp_path, run_event(tmp_path, user("Review SHOP-412"), said("Done.")))
+
+    assert [path.name for path in tickets.iterdir()] == ["SHOP-412"]
+    assert not (tmp_path / "home" / "escape").exists()
+
+
+def test_a_compaction_summary_does_not_start_a_run(tmp_path):
+    summary = user(
+        "This session is being continued from a previous conversation.", isCompactSummary=True
+    )
+    entries = (
+        user("Review SHOP-412"),
+        said("Draft."),
+        {**summary, "timestamp": "2026-03-04T10:40:00Z"},
+    )
+    save(tmp_path, run_event(tmp_path, *entries[:2]))
+
+    ticket = save(tmp_path, at_handback(tmp_path, "Final.", *entries)) / "SHOP-412"
+
+    [line] = index(ticket)
+    assert (ticket / line["report"]).read_text() == "Final.\n"

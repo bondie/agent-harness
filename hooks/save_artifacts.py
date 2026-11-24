@@ -132,6 +132,8 @@ def is_prompt(entry: dict[str, Any]) -> bool:
     content = message.get("content") if isinstance(message, dict) else None
     if entry.get("type") != "user" or not isinstance(content, (str, list)):
         return False
+    if entry.get("isCompactSummary") is True:
+        return False
     items = content if isinstance(content, list) else []
     if any(isinstance(item, dict) and item.get("type") == "tool_result" for item in items):
         return False
@@ -202,7 +204,9 @@ def remember_handback(
             and moment - value["at"] < KEEP_SECONDS
         }
         state[str(agent_id)] = {"prompt_at": prompt_at, "ticket": ticket, "at": moment}
-        write_json(home / HANDBACKS, state)
+        partial = home / f"{HANDBACKS}.tmp"
+        write_json(partial, state)
+        partial.replace(home / HANDBACKS)
 
 
 def run_ticket(
