@@ -5,6 +5,8 @@ import json
 import os
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from ticket_precedent.config import (
 from ticket_precedent.search import Searcher
 from ticket_precedent.store import Store
 
-from . import activetime, memory, prospective, team
+from . import activetime, conformal, memory, prospective, team
 from .artifacts import (
     DISPOSITIONS,
     SOURCES,
@@ -48,8 +50,8 @@ from .gitlog import (
 )
 from .llm import STRUCTURED, WITH_MEMORY, Backend, ClaudeCode, LLMEstimator, Ollama
 from .memory import Memory, load_memory
-from .report import report
-from .runner import claim_directory, load_run, run
+from .report import report, window_name, window_tables
+from .runner import Record, claim_directory, load_records, load_run, run, run_file
 
 BASELINES = ("neighbour-median", "recent-median", "era-scaled-median", "human")
 LLM_CONTEXTS = ("llm-none", "llm-keyword", "llm-hybrid", "llm-hybrid-recent")
@@ -109,11 +111,46 @@ def _parser() -> argparse.ArgumentParser:
     cmd = commands.add_parser("report", help="aggregate Markdown report of a run")
     cmd.add_argument("directory", type=Path)
     cmd.add_argument("--baseline", default="neighbour-median")
+    cmd.add_argument(
+        "--conformal",
+        metavar="WINDOW",
+        help="add the rolling conformal calibration of each variant's range on this window "
+        "(a number of tickets, or all); reads finish times from the index",
+    )
+    cmd.add_argument("--config", type=Path, help="ticket-precedent configuration file")
     cmd.set_defaults(handler=_report)
+
+    cmd = commands.add_parser(
+        "calibrate",
+        help="conformal calibration of a variant's P25-P75 and P90, measured on a rolling window",
+    )
+    cmd.add_argument("run", type=Path, help="run directory, or one variant's .jsonl")
+    cmd.add_argument("--variant", default="recent-median", help="in a run directory")
+    cmd.add_argument(
+        "--window",
+        type=_window,
+        help="tickets to calibrate on, or all (default: the window closest to nominal coverage)",
+    )
+    cmd.add_argument("--coverage", type=float, default=0.5, help="of the central range")
+    cmd.add_argument(
+        "--fit-on",
+        type=Path,
+        help="calibrate on another variant's .jsonl and apply its factors to this range",
+    )
+    cmd.add_argument("--config", type=Path, help="ticket-precedent configuration file")
+    cmd.add_argument(
+        "--write",
+        type=Path,
+        nargs="?",
+        const=conformal.default_path(),
+        metavar="PATH",
+        help=f"save the current calibration (default: {conformal.default_path()})",
+    )
+    cmd.set_defaults(handler=_calibrate)
 
     group = commands.add_parser("memory", help="check the lessons in the agents' memory")
     tasks = group.add_subparsers(required=True)
-    default_dir = Path.home() / ".claude" / "agent-memory"
+    default_dir = memory.agent_memory_root()
     cmd = tasks.add_parser(
         "lint", help="undated, sourceless and expired lessons, dead paths, files over the cap"
     )
@@ -525,8 +562,132 @@ def _report(args: argparse.Namespace) -> int:
     runs = load_run(args.directory)
     if not runs:
         raise ValueError(f"No results in {args.directory}")
-    print(report(runs, baseline=args.baseline), end="")
+    calibrated = None
+    if args.conformal is not None:
+        try:
+            window = _window(args.conformal)
+        except argparse.ArgumentTypeError as error:
+            raise ValueError(f"--conformal: {error}") from None
+        calibrated = _calibrated(runs, window, _load_config(args.config).index_path)
+    print(report(runs, baseline=args.baseline, calibrated=calibrated), end="")
     return 0
+
+
+def _window(text: str) -> int | None:
+    if text == "all":
+        return None
+    try:
+        window = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a number of tickets or all, got {text!r}"
+        ) from None
+    if window < 1:
+        raise argparse.ArgumentTypeError(f"a window holds at least one ticket, got {window}")
+    return window
+
+
+def _finishes(index: Path, records: Sequence[Record]) -> conformal.Finishes:
+    with closing(conformal.open_index(index)) as db:
+        return conformal.finish_times(db, [record.id for record in records])
+
+
+def _calibrated(
+    runs: dict[str, list[Record]], window: int | None, index: Path
+) -> dict[str, conformal.Evaluation]:
+    finishes = _finishes(index, [record for records in runs.values() for record in records])
+    calibrated = {}
+    for variant, records in runs.items():
+        pairs = conformal.prepare(records, finishes).pairs
+        if pairs:
+            calibrated[variant] = conformal.rolling(pairs, window)
+    return calibrated
+
+
+def _variant_records(path: Path, variant: str) -> tuple[str, list[Record]]:
+    if path.is_dir():
+        return variant, load_records(run_file(path, variant))
+    records = load_records(path)
+    return (records[0].variant if records else variant), records
+
+
+def _calibrate(args: argparse.Namespace) -> int:
+    variant, records = _variant_records(args.run, args.variant)
+    if not records:
+        raise ValueError(f"No {variant} results in {args.run}")
+    fit_on = load_records(args.fit_on) if args.fit_on else []
+    finishes = _finishes(_load_config(args.config).index_path, [*records, *fit_on])
+    prepared = conformal.prepare(records, finishes)
+    pool = conformal.prepare(fit_on, finishes).pairs if args.fit_on else None
+    windows = sorted({*conformal.WINDOWS, args.window}, key=conformal.size)
+    by_window = [
+        {
+            base: conformal.rolling(
+                prepared.pairs, window, args.coverage, p90_base=base, fit_on=pool
+            )
+            for base in conformal.BASES
+        }
+        for window in windows
+    ]
+    ranges = [by_base[conformal.P90_BASE] for by_base in by_window]
+    print(_calibrate_intro(variant, prepared, ranges[0], args.coverage))
+    print(window_tables(by_window) + "\n")
+    chosen = conformal.recommend(ranges)
+    print(
+        f"Recommended: {window_name(chosen.window)} (inside "
+        f"{chosen.shares(after=True).inside:.0%}, closest to {args.coverage:.0%}; ties go to "
+        "the narrower range)."
+    )
+    for each in conformal.BASES:
+        smallest = conformal.smallest_stable(by_base[each] for by_base in by_window)
+        found = "none" if smallest is None else window_name(smallest.window)
+        print(f"P90 from {each.upper()}: smallest window with stable coverage: {found}.")
+    window = chosen.window if args.window is None else args.window
+    evaluation = ranges[windows.index(window)]
+    if evaluation.latest is None:
+        print("Too few finished tickets for a current calibration.")
+        return 0
+    stable = conformal.p90_stable(evaluation)
+    latest = evaluation.latest if stable else replace(evaluation.latest, p90_factor=None)
+    print(_describe(latest, window))
+    if args.write is None:
+        return 0
+    data = conformal.as_json(latest, window) | {
+        "variant": variant,
+        "source_run": str(args.run),
+        "fitted_on": str(args.fit_on) if args.fit_on else None,
+        "p90_refused": None if stable else f"P90 coverage is not stable at {window_name(window)}",
+        "rolling": conformal.measured(evaluation),
+        "written_at": _now(),
+    }
+    args.write.parent.mkdir(parents=True, exist_ok=True)
+    args.write.write_text(json.dumps(data, indent=2) + "\n")
+    print(f"Wrote {args.write}")
+    return 0
+
+
+def _calibrate_intro(
+    variant: str, prepared: conformal.Prepared, first: conformal.Evaluation, coverage: float
+) -> str:
+    return (
+        f"{variant}: {prepared.records} tickets, {len(prepared.pairs)} with a usable range, "
+        f"{prepared.without_finish} of them not in the index, {prepared.from_updated} finished "
+        "at their last update (no worklog date).\n"
+        f"Rolling split-conformal at {coverage:.0%} coverage, calibrated only on tickets "
+        f"finished before each ticket was created: {len(first.outcomes)} scored, "
+        f"{first.skipped} skipped with fewer than {conformal.MINIMUM} calibration tickets.\n"
+    )
+
+
+def _describe(calibration: conformal.Calibration, window: int | None) -> str:
+    p90 = "P90 refused: its coverage is not stable at this window"
+    if calibration.p90_factor is not None:
+        p90 = f"P90 = {calibration.p90_base.upper()} x{calibration.p90_factor:.2f}"
+    return (
+        f"Current calibration, {window_name(window)} ({calibration.n} tickets finished "
+        f"{calibration.finished_from[:10]} to {calibration.finished_to[:10]}): "
+        f"P25 x{calibration.lower_factor:.2f}, P75 x{calibration.upper_factor:.2f}, {p90}."
+    )
 
 
 def _memory_lint(args: argparse.Namespace) -> int:

@@ -477,3 +477,117 @@ _Fewer than two tickets: nothing to compare._
 - recent-median: 150 tickets, 0 without an estimate, 0 with estimates masked in the text, 0.5 s per ticket
 - Compared on 150 tickets estimated by every variant.
 - The first run's files stay in their own run directory, with its partial gemma4:12b runs (stopped early) in a `partial-gemma/` subfolder, so `harness-eval report` on it reproduces the first run's 150 tickets.
+
+# 5. Calibrated ranges: rolling split-conformal (recent median, 1,206 tickets)
+
+The estimator says that a quarter of the actual times falls below its P25, half inside P25-P75
+and a quarter above P75. On the 2026 baselines (section 1) the recent median had 39% below,
+43% inside and 18% above: the range sits too high, because work got faster with AI agents.
+`harness-eval calibrate` corrects the range with asymmetric split-conformal calibration in
+log space and measures the correction the way it would have worked at the time:
+
+- scores `s_lo = log(p25) - log(actual)` and `s_hi = log(actual) - log(p75)`; each side takes
+  the conformal 0.75 quantile (the `ceil(0.75 * (n + 1))`-th smallest score), and
+  `p25' = p25 * exp(-q_lo)`, `p75' = p75 * exp(q_hi)`, never past the unchanged median;
+- a one-sided P90 bound from `s90 = log(actual) - log(p75)` at the 0.90 quantile,
+  `p90' = p75 * exp(q90)`, never below `p75'`, fitted only from at least 50 tickets;
+- each ticket is calibrated only on the last `window` tickets whose time was all logged
+  (`COALESCE(last_logged, updated)` in the ticket-precedent index) before it was created;
+  a ticket with fewer than 30 such tickets is skipped (42 here, the same in every window);
+- a P25 or P75 of zero or less counts as 0.05 h; an actual time on a boundary counts as
+  inside, as in the coverage of the other sections.
+
+The "uncalibrated" rows are measured on the same 1,164 scored tickets (40% / 43% / 18%; on
+all 1,206 it is 39% / 43% / 18%). Before calibration the P90 rows show the bare base.
+P90 coverage counts as stable when it is at most 2.5 points from 10% overall and in each half
+of the scored tickets in time order. 66 of the 1,206 tickets have no worklog date and use
+their last update as the finish time, which can only make them wait longer.
+
+## 5. Every window
+
+| P25-P75 | Below P25 | Inside [95% CI] | Above P75 | Relative width | Median width h |
+|---|---:|---:|---:|---:|---:|
+| uncalibrated | 40% | 43% [40%-45%] | 18% | 1.25 | 2.00 |
+| window 50 | 24% | 54% [51%-57%] | 22% | 1.09 | 1.80 |
+| window 100 | 25% | 52% [50%-55%] | 23% | 1.05 | 1.74 |
+| window 200 | 25% | 53% [51%-56%] | 22% | 1.09 | 1.83 |
+| window 400 | 26% | 53% [50%-56%] | 21% | 1.13 | 1.82 |
+| all earlier tickets | 25% | 54% [51%-57%] | 21% | 1.17 | 1.86 |
+
+| P90 from P75 | Above P90 [95% CI] | First half | Second half | Relative height | Median height h | Stable |
+|---|---:|---:|---:|---:|---:|---|
+| uncalibrated (P75) | 17% [15%-19%] | 23% | 11% | 1.86 | 2.94 | - |
+| window 50 | 10% [8%-12%] | 11% | 9% | 2.95 | 4.75 | yes |
+| window 100 | 10% [8%-12%] | 10% | 10% | 2.98 | 4.89 | yes |
+| window 200 | 9% [7%-11%] | 11% | 7% | 3.19 | 5.21 | no |
+| window 400 | 9% [7%-10%] | 11% | 6% | 3.23 | 5.15 | no |
+| all earlier tickets | 7% [6%-9%] | 11% | 3% | 3.38 | 5.37 | no |
+
+| P90 from MEDIAN | Above P90 [95% CI] | First half | Second half | Relative height | Median height h | Stable |
+|---|---:|---:|---:|---:|---:|---|
+| uncalibrated (MEDIAN) | 34% [31%-37%] | 41% | 28% | 1.00 | 1.50 | - |
+| window 50 | 10% [8%-12%] | 13% | 7% | 3.06 | 4.57 | no |
+| window 100 | 10% [8%-12%] | 12% | 8% | 3.13 | 4.66 | yes |
+| window 200 | 10% [8%-12%] | 13% | 7% | 3.22 | 4.87 | no |
+| window 400 | 10% [8%-11%] | 14% | 5% | 3.23 | 4.88 | no |
+| all earlier tickets | 9% [7%-11%] | 14% | 4% | 3.31 | 4.96 | no |
+
+P90 from P75: smallest window with stable coverage: window 50.
+P90 from MEDIAN: smallest window with stable coverage: window 100.
+
+**Chosen: window 100, P90 from P75.** Window 100 is closest to 50% inside (52%) and the
+narrowest range. P90 from the median is 0.23 h lower at window 100 (4.66 h vs 4.89 h), but it
+is stable only at that window and its halves differ (12% / 8%); from P75 it is stable from
+window 50 with even halves (10% / 10%), so the shipped calibration always scales the P75.
+Calibrated inside lands at 52-54% rather than 50% in every window: logged hours are coarse
+(quarters and halves), so many actual times sit exactly on a calibrated boundary and count as
+inside. Larger windows drift: with 200 tickets or more, the second half of the year has only
+3-7% above P90, because the window still holds tickets from before the pace settled. The
+window was chosen on the same tickets it is reported on.
+
+The calibration on the last 100 finished tickets (finished 2026-10-12 to 2026-11-26):
+P25 x0.62, P75 x0.84, P90 = P75 x1.58.
+
+## 5. The baselines with `harness-eval report --conformal 100`
+
+| Variant | Scored | Skipped | Below / inside / above | Relative width | Calibrated below / inside / above | Relative width | Above P90: P75, calibrated | P90 height h: P75, calibrated | P90 stable |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| era-scaled-median | 1167 | 45 | 40% / 45% / 15% | 1.44 | 26% / 52% / 23% | 1.04 | 15%, 11% | 3.64, 5.18 | yes |
+| neighbour-median | 1167 | 45 | 49% / 39% / 12% | 1.48 | 27% / 54% / 20% | 0.86 | 12%, 10% | 4.90, 5.90 | yes |
+| recent-median | 1164 | 42 | 40% / 43% / 18% | 1.25 | 25% / 52% / 23% | 1.05 | 17%, 10% | 2.94, 4.89 | yes |
+
+
+## 5. The LLM range, calibrated with the recent median's factors (150 tickets)
+
+The live estimator applies factors fitted on the recent median to the range it works out
+itself. The 150-ticket Claude Sonnet run (`llm-hybrid-recent`, section 4; the structured
+variants record no range) checks that case with `--fit-on`: each ticket gets the factors of
+the 100 recent-median tickets (of the 1,206) finished before it was created. 147 scored,
+3 skipped. With 150 tickets every share here is uncertain by about ±8 points.
+
+| P25-P75 | Below P25 | Inside [95% CI] | Above P75 | Relative width | Median width h |
+|---|---:|---:|---:|---:|---:|
+| uncalibrated | 36% | 52% [44%-60%] | 12% | 1.00 | 2.00 |
+| window 50 | 22% | 59% [51%-67%] | 18% | 1.02 | 1.78 |
+| window 100 | 22% | 57% [49%-65%] | 20% | 0.93 | 1.70 |
+| window 200 | 22% | 59% [51%-67%] | 19% | 0.97 | 1.77 |
+| window 400 | 22% | 60% [52%-67%] | 18% | 0.97 | 1.78 |
+| all earlier tickets | 20% | 62% [54%-69%] | 18% | 1.00 | 1.91 |
+
+| P90 from P75 | Above P90 [95% CI] | First half | Second half | Relative height | Median height h | Stable |
+|---|---:|---:|---:|---:|---:|---|
+| uncalibrated (P75) | 12% [7%-18%] | 24% | 0% | 1.67 | 3.00 | - |
+| window 50 | 5% [2%-10%] | 7% | 3% | 2.59 | 4.80 | no |
+| window 100 | 4% [2%-9%] | 7% | 1% | 2.64 | 4.72 | no |
+| window 200 | 4% [2%-9%] | 7% | 1% | 2.91 | 5.11 | no |
+| window 400 | 6% [3%-11%] | 11% | 0% | 2.91 | 5.09 | no |
+| all earlier tickets | 6% [3%-11%] | 11% | 0% | 2.97 | 5.57 | no |
+
+| P90 from MEDIAN | Above P90 [95% CI] | First half | Second half | Relative height | Median height h | Stable |
+
+The range moves from 36% / 52% / 12% to 22% / 57% / 20% at window 100, inside 57% with a 95%
+interval of 49-65%: the tails are closer to a quarter each, and the share inside is not
+measurably different from 50%. P90 is refused: with about 73 tickets in each half its
+coverage cannot be shown to be stable, and the shares above it (4-6%) suggest the bound is
+too high for the LLM's range. Calibrating the LLM range on its own 150 tickets is worse
+(inside 68%, 95% interval 59-76%): its earlier tickets are few and spread over ten months.

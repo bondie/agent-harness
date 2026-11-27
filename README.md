@@ -716,7 +716,9 @@ a real precedent it overstated the effort about three times in practice.
 
 The answer is one number rounded to half an hour, with the evidence for each part: the
 calibration rows and the arithmetic, or the tickets it used. The estimator still works out a
-P25–P75 range and shows it when asked; the backtest asks for it to measure its coverage.
+P25–P75 range and shows it when asked; the backtest asks for it to measure its coverage. In
+the reference-class mode it calibrates that range against logged time when its memory holds
+a calibration (see [Calibrated ranges](#calibrated-ranges)).
 
 To price in quarter or whole hours, set `HARNESS_ESTIMATE_STEP` to `0.25` or `1` in the `env`
 of the settings, like `HARNESS_TEST_COMMAND`: the estimate check then rounds the total to that
@@ -854,6 +856,58 @@ tickets where logged time differs from the estimate, the human estimate still le
 can be edited after creation; the 150-ticket sample gives wide intervals (about ±0.3 h);
 the process note given to the LLMs names the change date, which a real estimator would also
 be told.
+
+### Calibrated ranges
+
+**What it means.** A calibrated P25–P75 is a range that, over many tickets, holds the logged
+time about half of the time, with a quarter of tickets below it and a quarter above. A
+calibrated P90 is a bound that about nine tickets in ten finish within. Asked for a range or
+a fixed-price quote, the estimator says it like this: "with 75% confidence within 2 h, with
+90% confidence within 4 h (calibrated on the last 100 tickets)". These are averages over
+tickets, not a promise about any one ticket. They hold only for the reference-class mode
+(the bottom-up mode and tickets without a real precedent get no percentages), only while the
+team keeps its pace (refresh them as it changes), and logged time is their ground truth, so
+they inherit how people log. The estimate itself, the median, never changes.
+
+**Method.** Asymmetric split-conformal calibration in log space ([Romano et al.
+2019](https://arxiv.org/abs/1905.03222)), time-ordered on a rolling window. For each past
+ticket the scores are `log(p25) - log(actual)` and `log(actual) - log(p75)`; their conformal
+0.75 quantiles give the factors `p25' = p25 * exp(-q_lo)` and `p75' = p75 * exp(q_hi)`, kept
+on either side of the median. The P90 bound is `p75 * exp(q90)`, the conformal 0.90 quantile
+of `log(actual) - log(p75)`, fitted only from at least 50 tickets and only when its coverage
+is stable. Each ticket is calibrated only on the last 100 tickets whose time was all logged
+before it was created, the cut-off the backtest uses everywhere. A P25 of zero or less counts
+as 0.05 h.
+
+**Measured** on the recent median over 1,164 tickets of 2026 (42 more had fewer than 30
+earlier tickets to calibrate on):
+
+| P25–P75, window 100 | Below P25 | Inside [95% CI] | Above P75 | Median width | Above P90 | Median P90 |
+|---|---:|---:|---:|---:|---:|---:|
+| Uncalibrated (P90: the bare P75) | 40% | 43% [40–45%] | 18% | 2.00 h | 17% | 2.94 h |
+| **Calibrated** | **25%** | **52% [50–55%]** | **23%** | 1.74 h | **10%** | 4.89 h |
+
+Calibrated inside lands at 52–54% in every window rather than 50%: logged hours are coarse,
+so many actual times sit exactly on a boundary. Windows of 200 tickets or more drift, because
+they still hold tickets from before the pace settled. The window was chosen on the same
+tickets. The live estimator applies the recent median's factors to the range it works out
+itself; on the 150-ticket Claude Sonnet run that put 57% [49–65%] inside instead of 52%,
+within the ±8 points such a sample allows, and its P90 was refused as not shown to be stable
+there. Full tables: [section 5](results/2026-backtest.md).
+
+**Refresh** after the pace changes, or monthly: rerun the zero-cost recent-median backtest up
+to today, then write the calibration into the estimator's memory
+(`~/.claude/agent-memory/agent-harness-estimator/interval-calibration.json`):
+
+```bash
+uv run harness-eval run --out runs/NAME --from YYYY-MM-DD --to YYYY-MM-DD --variants recent-median
+uv run harness-eval calibrate runs/NAME --window 100 --write
+uv run harness-eval report runs/NAME --conformal 100   # the calibrated section of the report
+```
+
+`calibrate` prints every window (50, 100, 200, 400, all) before and after, recommends the one
+closest to nominal coverage, and refuses the P90 when its coverage is not stable at the
+window. The estimator only reads the file; it never computes or rewrites it.
 
 ## Measuring the team (not just the estimator)
 
@@ -1055,6 +1109,7 @@ uv run pytest --cov          # no network, no model, no tracker needed (workflow
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 claude plugin validate .
 uv run harness-eval run --out runs/NAME --from YYYY-MM-DD --to YYYY-MM-DD [--platform P]
+uv run harness-eval calibrate runs/NAME [--window 100] [--write]
 ```
 
 ## License

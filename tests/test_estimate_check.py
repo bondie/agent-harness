@@ -403,3 +403,11 @@ def test_the_example_in_the_estimator_prompt_passes_the_check():
     prompt = (ROOT / "agents" / "estimator.md").read_text()
     assert is_estimate(prompt)
     assert check_report(prompt) == (2.0, [])
+
+
+def test_a_calibrated_range_in_the_report_passes_the_check():
+    prose = (
+        "- **Estimate:** 2 h\n- **Range:** P25-P75 1-2.5 h; with 75% confidence within 2.5 h, "
+        "with 90% confidence within 4 h (calibrated on the last 100 tickets, rolling coverage 52%)"
+    )
+    assert check_report(report(reference(1.5, adjustment(), total=2.0), prose=prose)) == (2.0, [])
