@@ -3,15 +3,17 @@
 
 The estimator ends an estimate with a fenced block whose info string is
 `json harness-estimate`. Code, not the model, turns it into the number: the reference median,
-or the sum of the parts, plus the adjustments, rounded to half an hour and never below half an
-hour. A block that is missing or breaks a rule (an adjustment without a citation, a part
-without evidence, a total that differs from the computed one) keeps the estimator running
-with the errors as its next instruction, at most twice per run; after that the hook lets it
-stop and warns the person, and the count starts over only when the agent runs again. Reports
-without an "Estimate:" line (a recorded correction) and retro runs (task or latest
-coordinator message starting "Retro for") are not checked. A run starts at the task or at a
-coordinator message, so a resumed estimator is checked on its new report. When the hook
-cannot record its count, it lets the report through and says so.
+or the sum of the parts, plus the adjustments, rounded to the estimate step, half an hour by
+default, and never below one step. `HARNESS_ESTIMATE_STEP` sets the step in hours: 0.25, 0.5
+or 1; any other value keeps half an hour. A block that is missing or breaks a rule (an
+adjustment without a citation, a part without evidence, a total that differs from the
+computed one) keeps the estimator running with the errors as its next instruction, at most
+twice per run; after that the hook lets it stop and warns the person, and the count starts
+over only when the agent runs again. Reports without an "Estimate:" line (a recorded
+correction) and retro runs (task or latest coordinator message starting "Retro for") are not
+checked. A run starts at the task or at a coordinator message, so a resumed estimator is
+checked on its new report. When the hook cannot record its count, it lets the report through
+and says so.
 
 In auto mode the estimator delivers its report through SubagentHandback before it stops, so
 the same check runs as a PreToolUse hook on that tool and denies the call; the two paths share
@@ -57,6 +59,9 @@ MISSING = (
     "The report has no ```json harness-estimate block. End the report with one, as the Answer "
     "section describes."
 )
+STEP_VARIABLE = "HARNESS_ESTIMATE_STEP"
+STEPS = (0.25, 0.5, 1.0)
+DEFAULT_STEP = 0.5
 
 
 def round_half(hours: float) -> float:
@@ -64,11 +69,34 @@ def round_half(hours: float) -> float:
     return max(0.5, math.floor(hours * 2 + 0.5 + 1e-9) / 2)
 
 
+def round_step(hours: float, step: float = DEFAULT_STEP) -> float:
+    """The nearest multiple of `step`, halves rounded up, never below one step."""
+    return max(step, math.floor(hours / step + 0.5 + 1e-9) * step)
+
+
 def number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     result = float(value)
     return result if math.isfinite(result) else None
+
+
+def valid_step(value: object) -> float:
+    """`value` as a step of 0.25, 0.5 or 1 hour, from a number or its text; otherwise 0.5."""
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return DEFAULT_STEP
+    step = number(value)
+    if step is None or step not in STEPS:
+        return DEFAULT_STEP
+    return step
+
+
+def estimate_step(environ: Mapping[str, str]) -> float:
+    """The rounding step `HARNESS_ESTIMATE_STEP` sets; half an hour when unset or invalid."""
+    return valid_step(environ.get(STEP_VARIABLE))
 
 
 def is_repository_path(text: str) -> bool:
@@ -140,11 +168,11 @@ def _items(block: Mapping[str, Any], field: str) -> tuple[list[Any], list[str]]:
     return value, []
 
 
-def validate_and_total(block: object) -> tuple[float | None, list[str]]:
+def validate_and_total(block: object, step: float = DEFAULT_STEP) -> tuple[float | None, list[str]]:
     """The estimate code computes from a `harness-estimate` block, or the rules it breaks.
 
     Reference mode: reference_median + the adjustments. Bottom-up: the parts + the
-    adjustments. The model's own `total` is ignored. Rounded with `round_half`.
+    adjustments. The model's own `total` is ignored. Rounded to `step` with `round_step`.
     """
     if not isinstance(block, dict):
         return None, ["The harness-estimate block must be one JSON object."]
@@ -171,7 +199,7 @@ def validate_and_total(block: object) -> tuple[float | None, list[str]]:
     if mode == "bottom-up":
         base = sum(float(part["hours"]) for part in parts)
     shift = sum(float(adjustment["hours"]) for adjustment in adjustments)
-    return round_half((base or 0.0) + shift), []
+    return round_step((base or 0.0) + shift, step), []
 
 
 def find_block(text: str) -> tuple[object, list[str]]:
@@ -185,19 +213,25 @@ def find_block(text: str) -> tuple[object, list[str]]:
         return None, [f"The harness-estimate block is not valid JSON: {error}."]
 
 
-def check_report(text: str) -> tuple[float | None, list[str]]:
+def _rounding(step: float) -> str:
+    if step == DEFAULT_STEP:
+        return ""
+    return f" (rounded to {step:g} h steps)"
+
+
+def check_report(text: str, step: float = DEFAULT_STEP) -> tuple[float | None, list[str]]:
     """Errors of an estimate report, including a stated total that differs from the code's."""
     block, errors = find_block(text)
     if errors:
         return None, errors
-    total, errors = validate_and_total(block)
+    total, errors = validate_and_total(block, step)
     if errors or total is None or not isinstance(block, dict):
         return None, errors
     stated = number(block.get("total"))
     if stated != total:
         return total, [
-            f"total is {block.get('total')!r}, but the block computes to {total:g} h. Set total "
-            f"to {total:g} and give {total:g} h as the Estimate."
+            f"total is {block.get('total')!r}, but the block computes to {total:g} h"
+            f"{_rounding(step)}. Set total to {total:g} and give {total:g} h as the Estimate."
         ]
     return total, []
 
@@ -374,7 +408,7 @@ def handback_decision(
     if not is_estimate(report):
         return None
     path = state_path(event, environ)
-    _, errors = check_report(report)
+    _, errors = check_report(report, estimate_step(environ))
     blocks = _blocks_so_far(path)
     denied = bool(errors) and blocks < MAX_BLOCKS
     try:
@@ -419,7 +453,7 @@ def decision(event: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, 
         report = message if isinstance(message, str) else last
     if not is_estimate(report):
         return None
-    _, errors = check_report(report)
+    _, errors = check_report(report, estimate_step(environ))
     if not errors:
         path.unlink(missing_ok=True)
         return None

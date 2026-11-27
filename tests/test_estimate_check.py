@@ -2,17 +2,22 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from agent_harness.estimate_check import (
     MISSING,
     NO_EVIDENCE,
+    STEPS,
     UNCITED,
     check_report,
+    estimate_step,
     find_block,
     is_citation,
     is_estimate,
     round_half,
+    round_step,
+    valid_step,
     validate_and_total,
 )
 
@@ -75,6 +80,92 @@ def test_rounding_matches_the_nearest_half_hour_with_ties_up(hours):
 
 def test_rounding_is_not_fooled_by_float_error():
     assert round_half(1.15 + 0.1) == 1.5
+
+
+def brute_force_step(hours: float, step: float) -> float:
+    grid = [k * step for k in range(1, round(200 / step))]
+    return min(grid, key=lambda candidate: (abs(candidate - hours), -candidate))
+
+
+def test_a_half_hour_step_rounds_exactly_like_round_half():
+    rng = np.random.default_rng(11)
+    ties = [k / 4 for k in range(-8, 200)]
+    values = [*ties, 1.15 + 0.1, *(float(value) for value in rng.uniform(-5, 60, 5000))]
+    for hours in values:
+        assert round_step(hours, 0.5) == round_half(hours), hours
+        assert round_step(hours) == round_half(hours), hours
+
+
+@pytest.mark.parametrize("step", STEPS)
+def test_rounding_matches_the_nearest_step_with_ties_up(step):
+    rng = np.random.default_rng(5)
+    edges = [-3, -0.2, 0, 0.1, 0.125, 0.13, 0.375, 0.5, 0.74, 0.75, 1.125, 1.5, 2.6, 7.875, 40.1]
+    for hours in [*edges, *(float(value) for value in rng.uniform(-2, 50, 500))]:
+        assert round_step(hours, step) == brute_force_step(hours, step), hours
+
+
+def test_the_total_is_never_below_one_step():
+    assert round_step(0.1, 0.25) == 0.25
+    assert round_step(0.1, 1.0) == 1.0
+    assert validate_and_total(reference(0.1), 0.25) == (0.25, [])
+    assert validate_and_total(reference(1.0, adjustment(-2)), 0.25) == (0.25, [])
+
+
+def quarters(**fields: Any) -> dict[str, Any]:
+    return {
+        **bottom_up(part(0.25), part(0.25, "verification"), part(0.25, "release")),
+        **fields,
+    }
+
+
+def test_a_quarter_hour_step_keeps_quarter_hour_parts():
+    assert validate_and_total(quarters(), 0.25) == (0.75, [])
+    assert validate_and_total(quarters()) == (1.0, [])
+
+
+def test_reference_mode_rounds_to_the_step():
+    block = reference(1.25, adjustment(0.5))
+    assert validate_and_total(block, 0.25) == (1.75, [])
+    assert validate_and_total(block) == (2.0, [])
+    assert validate_and_total(reference(1.1), 0.25) == (1.0, [])
+    assert validate_and_total(reference(1.125), 0.25) == (1.25, [])
+    assert validate_and_total(reference(1.25, adjustment(0.25)), 1.0) == (2.0, [])
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0.25", 0.25),
+        ("0.5", 0.5),
+        ("1", 1.0),
+        ("1.0", 1.0),
+        (" 0.25 ", 0.25),
+        ("", 0.5),
+        ("quarter", 0.5),
+        ("0", 0.5),
+        ("-0.25", 0.5),
+        ("0.3", 0.5),
+        ("0.2500001", 0.5),
+        ("2", 0.5),
+        ("nan", 0.5),
+        ("inf", 0.5),
+        ("1e400", 0.5),
+    ],
+)
+def test_the_step_comes_from_the_environment(value, expected):
+    assert estimate_step({"HARNESS_ESTIMATE_STEP": value}) == expected
+
+
+def test_without_the_variable_the_step_is_half_an_hour():
+    assert estimate_step({}) == 0.5
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0.25, 0.25), (1, 1.0), ("1", 1.0), (None, 0.5), (0, 0.5), (True, 0.5), ([0.25], 0.5)],
+)
+def test_a_stored_step_is_one_of_the_three(value, expected):
+    assert valid_step(value) == expected
 
 
 def test_reference_mode_is_the_median_plus_the_adjustments():
@@ -277,6 +368,19 @@ def test_check_report_rejects_a_stated_total_that_differs():
 def test_check_report_passes_on_block_errors():
     assert check_report("no block") == (None, [MISSING])
     assert UNCITED in check_report(report(reference(1.5, adjustment(citation=""))))[1][0]
+
+
+def test_check_report_checks_the_total_at_the_step():
+    assert check_report(report(quarters(total=0.75)), 0.25) == (0.75, [])
+    assert check_report(report(quarters(total=1.0))) == (1.0, [])
+
+    total, errors = check_report(report(quarters(total=1.0)), 0.25)
+
+    assert total == 0.75
+    assert errors == [
+        "total is 1.0, but the block computes to 0.75 h (rounded to 0.25 h steps). Set total "
+        "to 0.75 and give 0.75 h as the Estimate."
+    ]
 
 
 @pytest.mark.parametrize(

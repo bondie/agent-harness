@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .artifacts import Json, read_json
-from .estimate_check import number, validate_and_total
+from .estimate_check import DEFAULT_STEP, number, valid_step, validate_and_total
 from .metrics import Prediction, absolute_errors
 
 PART_KINDS = ("implementation", "verification", "release")
@@ -23,9 +23,9 @@ ACTUAL_SOURCES = ("measured", "worklog")
 EPSILON = 1e-9
 
 
-def estimate_total(estimate: Json) -> float:
+def estimate_total(estimate: Json, step: float = DEFAULT_STEP) -> float:
     """The total the estimate check computes, never the model's own number."""
-    total, problems = validate_and_total(estimate)
+    total, problems = validate_and_total(estimate, step)
     if total is None:
         raise ValueError(
             "The estimate does not pass the harness-estimate check: " + " ".join(problems)
@@ -75,18 +75,26 @@ def stated_total(estimate: Json) -> float | None:
 
 
 def eval_case(
-    key: str, estimate: Json, analysis: Json | None, actual: Json, diff: Json | None
+    key: str,
+    estimate: Json,
+    analysis: Json | None,
+    actual: Json,
+    diff: Json | None,
+    step: float = DEFAULT_STEP,
 ) -> Json:
     """The case of a finished ticket. An estimate the check still rejected when the hook let it
-    through after its retries keeps its stated total and the check's errors."""
-    case = {
+    through after its retries keeps its stated total and the check's errors. A step other than
+    half an hour is kept as `estimate_step`."""
+    case: Json = {
         "ticket": key,
         "estimate": estimate,
         "analysis": analysis,
         "actual": actual,
         "diff": diff,
     }
-    total, problems = validate_and_total(estimate)
+    if step != DEFAULT_STEP:
+        case["estimate_step"] = step
+    total, problems = validate_and_total(estimate, step)
     if total is not None:
         return case
     if stated_total(estimate) is None:
@@ -102,9 +110,10 @@ def check_failed(case: Json) -> bool:
 
 
 def case_total(case: Json) -> float:
-    """The code's total, or the stated one of an estimate kept after the check failed."""
+    """The code's total at the case's step, or the stated one of an estimate kept after the
+    check failed."""
     if not check_failed(case):
-        return estimate_total(case["estimate"])
+        return estimate_total(case["estimate"], valid_step(case.get("estimate_step")))
     total = stated_total(case["estimate"])
     if total is None:
         raise ValueError(f"The estimate of {case.get('ticket')} states no total")
