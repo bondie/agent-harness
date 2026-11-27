@@ -29,6 +29,7 @@ from typing import Any
 from .artifacts import harness_home as harness_home
 
 INDEX = "MEMORY.md"
+ESTIMATOR = "agent-harness:estimator"
 BULLET = re.compile(r"[-*+]\s")
 INDEX_LINK = re.compile(r"[-*+]\s+\[[^\]]+\]\((?![a-zA-Z][\w+.-]*:)[^)\s]+\.md\)")
 TRAILER = re.compile(
@@ -40,6 +41,16 @@ FENCE = re.compile(r"(`{3,}|~{3,})")
 ABSOLUTE_PATH = re.compile(r"(?<![\w.~/:>}*-])~?/[^\s`'\"()\[\]{}<>,;:|*$]+")
 PLACEHOLDER = set("<>{}*$")
 EXCERPT = 80
+
+
+def agent_memory_root() -> Path:
+    """Where `memory: user` agents keep their memory, as the hooks resolve it."""
+    return Path.home() / ".claude" / "agent-memory"
+
+
+def memory_dir_name(agent_type: str) -> str:
+    """An agent's directory under the root; mirrors `hooks/guard_memory_writes.py`."""
+    return re.sub(r"[^a-zA-Z0-9\-_]", "-", agent_type) or "unknown"
 
 
 @dataclass(frozen=True)

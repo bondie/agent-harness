@@ -41,3 +41,12 @@ def test_the_estimator_reads_its_calibration_and_corrections_first():
 def test_the_offline_notes_say_there_are_no_memory_files_to_open(offline):
     assert "There are no memory files to open" in prose(offline)
     assert "already in this prompt" in prose(offline)
+
+
+def test_the_estimator_reads_but_never_writes_its_interval_calibration():
+    text = prose((AGENTS / "estimator.md").read_text())
+
+    assert "If your memory directory holds `interval-calibration.json`, read it as well" in text
+    assert "`harness-eval calibrate --write`; never compute, edit or rewrite it yourself" in text
+    assert "never changes the Estimate" in text
+    assert "give no percentages and no P90" in text
