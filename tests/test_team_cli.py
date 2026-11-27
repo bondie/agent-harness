@@ -54,6 +54,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_HOME", str(path))
     monkeypatch.setenv("HARNESS_RUNS_LOG", str(tmp_path / "runs.jsonl"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.delenv("HARNESS_ESTIMATE_STEP", raising=False)
     ticket = path / "tickets" / "SHOP-412"
     ticket.mkdir(parents=True)
     (ticket / "estimate.json").write_text(json.dumps(ESTIMATE))
@@ -174,6 +175,79 @@ def test_eval_reads_the_exported_cases(home, capsys):
 
     assert cli.main(["eval", str(home / "nothing")]) == 1
     assert "No eval cases" in capsys.readouterr().err
+
+
+def test_export_case_rounds_to_the_estimate_step_and_keeps_it(home, monkeypatch, capsys):
+    parts = [
+        {"name": kind, "kind": kind, "hours": 0.25, "evidence": ["SHOP-1"]}
+        for kind in ("implementation", "verification", "release")
+    ]
+    quarters = {**ESTIMATE, "parts": parts, "total": 0.75}
+    (home / "tickets" / "SHOP-412" / "estimate.json").write_text(json.dumps(quarters))
+    arguments = ["export-case", "SHOP-412", "--source", "worklog", "--actual-total", "1"]
+    monkeypatch.setenv("HARNESS_ESTIMATE_STEP", "0.25")
+
+    assert cli.main(arguments) == 0
+    assert "SHOP-412: estimate 0.75 h, actual 1 h" in capsys.readouterr().out
+    assert read(home / "eval-cases" / "SHOP-412.json")["estimate_step"] == 0.25
+
+    monkeypatch.delenv("HARNESS_ESTIMATE_STEP")
+    assert cli.main(["eval"]) == 0
+    assert "| all | 1 | 0.25 | 0.25 | -0.25 | 0 | 1 |" in capsys.readouterr().out
+
+    assert cli.main(arguments) == 0
+    assert "SHOP-412: estimate 1 h, actual 1 h" in capsys.readouterr().out
+    assert "estimate_step" not in read(home / "eval-cases" / "SHOP-412.json")
+
+
+STEP_WARNING = "; the hook may have used another step (set HARNESS_ESTIMATE_STEP for the export)"
+
+
+@pytest.mark.parametrize(
+    ("first", "stated", "step", "warning"),
+    [
+        (0.75, 1.5, "0.25", "states 1.5 h but computes to 1.25 h at the export step 0.25 h"),
+        (0.25, 0.75, None, "states 0.75 h but computes to 1 h at the export step 0.5 h"),
+        (0.25, 0.75, "0.25", None),
+        (0.75, 1.5, None, None),
+        (0.75, None, "0.25", None),
+    ],
+)
+def test_export_case_warns_when_the_estimate_needs_another_step(
+    home, monkeypatch, capsys, first, stated, step, warning
+):
+    parts = [
+        {"name": "rounding", "kind": "implementation", "hours": first, "evidence": ["SHOP-1"]},
+        {"name": "checkout", "kind": "verification", "hours": 0.25, "evidence": ["SHOP-2"]},
+        {"name": "deploy", "kind": "release", "hours": 0.25, "evidence": ["measured:deploy"]},
+    ]
+    estimate = {**ESTIMATE, "parts": parts, "total": stated}
+    (home / "tickets" / "SHOP-412" / "estimate.json").write_text(json.dumps(estimate))
+    if step is not None:
+        monkeypatch.setenv("HARNESS_ESTIMATE_STEP", step)
+
+    assert cli.main(["export-case", "SHOP-412", "--source", "worklog", "--actual-total", "1"]) == 0
+
+    err = capsys.readouterr().err
+    assert (home / "eval-cases" / "SHOP-412.json").is_file()
+    if warning is None:
+        assert "warning" not in err
+        return
+    assert f"warning: the estimate {warning}{STEP_WARNING}" in err
+
+
+def test_export_case_kept_after_the_check_failed_gets_no_step_warning(home, monkeypatch, capsys):
+    rejected = {
+        **ESTIMATE,
+        "adjustments": [{"hours": 1.0, "reason": "gut feeling", "citation": ""}],
+        "total": 3.0,
+    }
+    (home / "tickets" / "SHOP-412" / "estimate.json").write_text(json.dumps(rejected))
+    monkeypatch.setenv("HARNESS_ESTIMATE_STEP", "0.25")
+
+    assert cli.main(["export-case", "SHOP-412", "--source", "worklog", "--actual-total", "2"]) == 0
+
+    assert "warning" not in capsys.readouterr().err
 
 
 def test_review_finding_records_the_disposition(home, capsys):

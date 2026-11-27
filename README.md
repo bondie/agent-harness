@@ -718,6 +718,12 @@ The answer is one number rounded to half an hour, with the evidence for each par
 calibration rows and the arithmetic, or the tickets it used. The estimator still works out a
 P25–P75 range and shows it when asked; the backtest asks for it to measure its coverage.
 
+To price in quarter or whole hours, set `HARNESS_ESTIMATE_STEP` to `0.25` or `1` in the `env`
+of the settings, like `HARNESS_TEST_COMMAND`: the estimate check then rounds the total to that
+step (never below one step) and names the step when it rejects a stated total, and
+`export-case` keeps it in the case. Any other value keeps half an hour. The estimator's prompt
+still asks for half hours.
+
 The calibration and the corrections a person made to past estimates live in the estimator's
 [memory](https://code.claude.com/docs/en/sub-agents) (`memory: user`, so
 `~/.claude/agent-memory/agent-harness-estimator/`), outside the repository. The playbook
@@ -894,7 +900,12 @@ uv run harness-eval active-time SHOP-412                         # --idle 10, --
   A commit on two branches (a cherry-pick) counts once; two commits with the same message and
   changes but different author times count twice. An estimate the hook let through after its
   retries although the check still rejected it is exported with its stated total and the
-  check's errors (`check_errors`). It also writes `outcome.json` into the ticket directory.
+  check's errors (`check_errors`). A `HARNESS_ESTIMATE_STEP` other than half an hour at export
+  time is kept as `estimate_step`, and `eval` rounds that case's total to it. The step comes
+  from the environment of the export, not from the estimate: export from the session whose
+  settings set it, as the retro skill does, and set the variable on the command line for a
+  ticket estimated before the step changed. A stated total that differs from the one computed
+  at the export step gets a warning. It also writes `outcome.json` into the ticket directory.
 - **`active-time KEY`** sums the time a session or an agent was busy on the ticket, from the
   Claude Code transcripts ([Work markers](#work-markers)). A session counts from its marker
   for the key until its next marker; inside that window its own records count, and so do those

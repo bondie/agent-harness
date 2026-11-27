@@ -9,6 +9,7 @@ from agent_harness.prospective import (
     MODES,
     PART_KINDS,
     actual,
+    case_total,
     errors,
     estimate_total,
     eval_case,
@@ -98,6 +99,36 @@ def test_the_total_is_the_one_the_estimate_check_computes():
 def test_a_total_is_never_below_half_an_hour():
     estimate = {"mode": "reference", "reference_median": 1.0, "adjustments": [adjustment(-2)]}
     assert estimate_total(estimate) == 0.5
+
+
+QUARTERS = {
+    "mode": "bottom-up",
+    "parts": [part("implementation", 0.25), part("verification", 0.25), part("release", 0.25)],
+    "total": 0.75,
+}
+
+
+def test_the_total_rounds_to_the_step():
+    assert estimate_total(QUARTERS, 0.25) == 0.75
+    assert estimate_total(QUARTERS) == 1.0
+
+
+def test_a_case_keeps_its_step_and_its_total_uses_it():
+    measured = actual(1.0, [], "worklog")
+    quarter = eval_case("SHOP-412", QUARTERS, None, measured, None, 0.25)
+    half = eval_case("SHOP-412", QUARTERS, None, measured, None)
+
+    assert quarter["estimate_step"] == 0.25
+    assert case_total(quarter) == 0.75
+    assert "estimate_step" not in half
+    assert case_total(half) == 1.0
+
+
+@pytest.mark.parametrize("step", [0, -0.25, 0.3, "x", True, None])
+def test_a_case_with_an_invalid_step_rounds_to_half_an_hour(step):
+    case = eval_case("SHOP-412", QUARTERS, None, actual(1.0, [], "worklog"), None, 0.25)
+    case["estimate_step"] = step
+    assert case_total(case) == 1.0
 
 
 @pytest.mark.parametrize(

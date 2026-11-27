@@ -36,6 +36,7 @@ from .artifacts import (
 )
 from .baselines import EraScaledMedian, Estimator, HumanEstimate, NeighbourMedian
 from .dataset import load_targets, sample
+from .estimate_check import estimate_step
 from .gitlog import (
     DEFAULT_TEST_PATTERNS,
     FileChange,
@@ -393,7 +394,8 @@ def _export_case(args: argparse.Namespace) -> int:
             print(f"warning: no commit names {term} in the repositories", file=sys.stderr)
         found_diff = diff(found, args.test_pattern or DEFAULT_TEST_PATTERNS).as_json()
     analysis = read_object(directory / "analysis.json")
-    case = prospective.eval_case(args.key, estimate, analysis, actual, found_diff)
+    step = estimate_step(os.environ)
+    case = prospective.eval_case(args.key, estimate, analysis, actual, found_diff, step)
     active = activetime.measure(args.key)
     if active.total_seconds:
         case["active_time"] = active.as_json() | {
@@ -406,6 +408,14 @@ def _export_case(args: argparse.Namespace) -> int:
         outcome["active_time"] = case["active_time"]
     write_json(directory / "outcome.json", outcome)
     estimated = prospective.case_total(case)
+    stated = prospective.stated_total(estimate)
+    if stated is not None and stated != estimated:
+        print(
+            f"warning: the estimate states {stated:g} h but computes to {estimated:g} h at the "
+            f"export step {step:g} h; the hook may have used another step (set "
+            "HARNESS_ESTIMATE_STEP for the export)",
+            file=sys.stderr,
+        )
     kept = " (stated total, the estimate check failed)" if case.get("check_errors") else ""
     print(
         f"{args.key}: estimate {estimated:g} h{kept}, actual {actual['total']:g} h; wrote {target}"

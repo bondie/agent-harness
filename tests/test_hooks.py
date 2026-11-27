@@ -934,8 +934,8 @@ def estimator_stop(
     return event
 
 
-def check_estimate(tmp_path: Path, event: dict[str, Any]) -> dict[str, Any] | None:
-    result = hook("estimate_check.py", event, HARNESS_HOME=str(tmp_path / "home"))
+def check_estimate(tmp_path: Path, event: dict[str, Any], **env: str) -> dict[str, Any] | None:
+    result = hook("estimate_check.py", event, HARNESS_HOME=str(tmp_path / "home"), **env)
     assert result.returncode == 0
     return json.loads(result.stdout) if result.stdout else None
 
@@ -1172,6 +1172,54 @@ def test_an_invalid_handback_is_denied(tmp_path):
 )
 def test_other_handbacks_go_through(tmp_path, event):
     assert check_estimate(tmp_path, event) is None
+
+
+QUARTER_PARTS = [
+    {"name": kind, "kind": kind, "hours": 0.25, "evidence": ["SHOP-398"]}
+    for kind in ("implementation", "verification", "release")
+]
+
+
+def quarter_report(total: float) -> str:
+    return estimate_report(
+        mode="bottom-up", reference_median=None, parts=QUARTER_PARTS, adjustments=[], total=total
+    )
+
+
+def estimator_event(tmp_path: Path, path: str, report: str) -> dict[str, Any]:
+    if path == "handback":
+        return estimator_handback(report)
+    return estimator_stop(tmp_path, report)
+
+
+def estimate_denial(path: str, verdict: dict[str, Any] | None) -> str:
+    if path == "handback":
+        return handback_denial(verdict)
+    assert verdict is not None
+    assert verdict["decision"] == "block"
+    return str(verdict["reason"])
+
+
+@pytest.mark.parametrize("path", ["stop", "handback"])
+@pytest.mark.parametrize(
+    ("step", "computed", "wrong", "rounding"),
+    [
+        ("0.25", "0.75", 1.0, " (rounded to 0.25 h steps)"),
+        ("1", "1", 0.75, " (rounded to 1 h steps)"),
+        ("", "1", 0.75, ""),
+        ("0.3", "1", 0.75, ""),
+    ],
+)
+def test_both_paths_check_the_total_at_the_step_of_the_environment(
+    tmp_path, path, step, computed, wrong, rounding
+):
+    env = {"HARNESS_ESTIMATE_STEP": step}
+    valid = estimator_event(tmp_path, path, quarter_report(float(computed)))
+    assert check_estimate(tmp_path, valid, **env) is None
+
+    invalid = estimator_event(tmp_path, path, quarter_report(wrong))
+    reason = estimate_denial(path, check_estimate(tmp_path / "second", invalid, **env))
+    assert f"computes to {computed} h{rounding}. Set total to {computed} and" in reason
 
 
 def test_handback_and_stop_share_the_count(tmp_path):
